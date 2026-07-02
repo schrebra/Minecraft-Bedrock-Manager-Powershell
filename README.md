@@ -2,6 +2,9 @@
 
 A simple, graphical control panel for setting up, running, and maintaining a Minecraft Bedrock Dedicated Server on Windows. It replaces manual command-line tasks, manual file downloads, and messy configuration updates with an automated, easy-to-use desktop application interface.
 
+<img width="60%" alt="image" src="https://github.com/user-attachments/assets/f821d38d-a260-470e-8698-20fd4dc9e519" />
+
+
 ## What It Is
 Hosting a private multiplayer world for Minecraft Bedrock Edition (the version used on Windows 10/11, iOS, Android, and consoles) normally requires you to manually download ZIP archives from Mojang, track version changes, manage your own backups, and keep a simple command-line window open at all times. 
 
