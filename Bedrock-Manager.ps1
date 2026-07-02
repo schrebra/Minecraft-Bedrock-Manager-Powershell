@@ -13,9 +13,6 @@
     C:\Bedrock\Logs     (Daily Manager Logs)
     C:\Bedrock\UpdateTemp (Temporary download/extraction files)
 
-.VERSION
-    17.0 (2025-01-06)
-#>
 
 param(
     [string]$RootPath = ""
