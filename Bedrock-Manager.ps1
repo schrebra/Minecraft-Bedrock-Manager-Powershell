@@ -13,6 +13,9 @@
     C:\Bedrock\Logs     (Daily Manager Logs)
     C:\Bedrock\UpdateTemp (Temporary download/extraction files)
 
+.VERSION
+    18.0
+#>
 
 param(
     [string]$RootPath = ""
@@ -70,7 +73,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 <Window
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="Minecraft Bedrock Server Manager v17.0"
+    Title="Minecraft Bedrock Server Manager v18.0"
     Width="1024" Height="680"
     MinWidth="800" MinHeight="500"
     WindowStartupLocation="CenterScreen"
@@ -190,9 +193,9 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0">
                 <TextBlock Text="Minecraft Bedrock Server Manager" FontSize="18" FontWeight="Bold" Foreground="{StaticResource TextPrimary}"/>
-                <TextBlock Text="v17.0 Production Ready" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,2,0,0"/>
+                <TextBlock Text="v18.0 Production Ready" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,2,0,0"/>
             </StackPanel>
-            <Border Grid.Column="1" Background="{StaticResource BgCard}" BorderBrush="{StaticResource BorderDefault}" BorderThickness="1" CornerRadius="4" Padding="8,5" VerticalAlignment="Center">
+            <Border Grid.Column="1" Background="{StaticResource BgCard}" BorderBrush="{StaticResource BorderDefault}" BorderThickness="1" CornerRadius="4" Padding="8,5" VerticalAlignment="Center" ToolTip="Shows the time remaining until the next automatic check for server updates.">
                 <StackPanel Orientation="Horizontal">
                     <Ellipse x:Name="dotPeriodic" Width="8" Height="8" Fill="{StaticResource AccentGray}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                     <TextBlock x:Name="lblNextCheck" Text="Auto-check: —" Foreground="{StaticResource TextSecondary}" FontSize="10.5" VerticalAlignment="Center"/>
@@ -209,40 +212,40 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0" Text="Root Directory" Style="{StaticResource InfoKey}" Margin="0,0,10,0"/>
-                <TextBox Grid.Column="1" x:Name="txtRootPath" Style="{StaticResource LightTextBox}"/>
-                <Button Grid.Column="2" x:Name="btnBrowse" Content="Browse…" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}"/>
-                <Button Grid.Column="3" x:Name="btnOpenFolder" Content="Explorer" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}"/>
+                <TextBlock Grid.Column="0" Text="Root Directory" Style="{StaticResource InfoKey}" Margin="0,0,10,0" ToolTip="The main folder where Server, Backup, Logs, and UpdateTemp are stored."/>
+                <TextBox Grid.Column="1" x:Name="txtRootPath" Style="{StaticResource LightTextBox}" ToolTip="The base directory for all Minecraft server files and management files. Default is C:\Bedrock"/>
+                <Button Grid.Column="2" x:Name="btnBrowse" Content="Browse…" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" ToolTip="Click to browse for a different root folder."/>
+                <Button Grid.Column="3" x:Name="btnOpenFolder" Content="Explorer" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" ToolTip="Open the root directory in Windows Explorer."/>
             </Grid>
         </Border>
 
         <!-- ═══ 2 · STAT CARDS ══════════════════════════════════════════════ -->
         <UniformGrid Grid.Row="2" Columns="5">
-            <Border Style="{StaticResource Card}">
+            <Border Style="{StaticResource Card}" ToolTip="The version of the Minecraft server currently installed in the Server folder.">
                 <StackPanel>
                     <TextBlock Text="INSTALLED" Style="{StaticResource StatLabel}"/>
                     <TextBlock x:Name="lblInstalled" Text="—" Style="{StaticResource StatValue}"/>
                 </StackPanel>
             </Border>
-            <Border Style="{StaticResource Card}">
+            <Border Style="{StaticResource Card}" ToolTip="The newest version of the server available from Mojang/Minecraft.net.">
                 <StackPanel>
                     <TextBlock Text="LATEST" Style="{StaticResource StatLabel}"/>
                     <TextBlock x:Name="lblLatest" Text="—" Style="{StaticResource StatValue}" Foreground="{StaticResource AccentBlue}"/>
                 </StackPanel>
             </Border>
-            <Border Style="{StaticResource Card}">
+            <Border Style="{StaticResource Card}" ToolTip="Current status of the bedrock_server.exe process. (Running, Stopped, Starting, etc.)">
                 <StackPanel>
                     <TextBlock Text="STATUS" Style="{StaticResource StatLabel}"/>
                     <TextBlock x:Name="lblServerStatus" Text="—" Style="{StaticResource StatValue}" Foreground="{StaticResource AccentOrange}"/>
                 </StackPanel>
             </Border>
-            <Border Style="{StaticResource Card}">
+            <Border Style="{StaticResource Card}" ToolTip="Indicates whether the server software has been successfully installed or if setup is needed.">
                 <StackPanel>
                     <TextBlock Text="SETUP" Style="{StaticResource StatLabel}"/>
                     <TextBlock x:Name="lblSetupStatus" Text="—" Style="{StaticResource StatValue}"/>
                 </StackPanel>
             </Border>
-            <Border Style="{StaticResource Card}">
+            <Border Style="{StaticResource Card}" ToolTip="Shows if your installed version is up to date or if a new update is available.">
                 <StackPanel>
                     <TextBlock Text="UPDATE" Style="{StaticResource StatLabel}"/>
                     <TextBlock x:Name="lblUpdateStatus" Text="—" Style="{StaticResource StatValue}" Foreground="{StaticResource AccentGray}"/>
@@ -265,7 +268,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
                         <TextBlock Grid.Column="0" Text="Server Dir:" Style="{StaticResource InfoKey}"/>
-                        <TextBlock Grid.Column="1" x:Name="lblInstallDir" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand"/>
+                        <TextBlock Grid.Column="1" x:Name="lblInstallDir" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand" ToolTip="Click to open the Server directory where bedrock_server.exe is located."/>
                     </Grid>
                     <Grid>
                         <Grid.ColumnDefinitions>
@@ -273,7 +276,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
                         <TextBlock Grid.Column="0" Text="Backups Dir:" Style="{StaticResource InfoKey}"/>
-                        <TextBlock Grid.Column="1" x:Name="lblBackupDir" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand"/>
+                        <TextBlock Grid.Column="1" x:Name="lblBackupDir" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand" ToolTip="Click to open the Backup directory where configuration file revisions are stored."/>
                     </Grid>
                 </StackPanel>
                 <Rectangle Grid.Column="1" Fill="{StaticResource BorderDefault}" Width="1"/>
@@ -284,7 +287,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
                         <TextBlock Grid.Column="0" Text="Logs Dir:" Style="{StaticResource InfoKey}"/>
-                        <TextBlock Grid.Column="1" x:Name="lblLogFile" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand"/>
+                        <TextBlock Grid.Column="1" x:Name="lblLogFile" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand" ToolTip="Click to open today's manager log file in Notepad."/>
                     </Grid>
                     <Grid>
                         <Grid.ColumnDefinitions>
@@ -292,7 +295,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
                         <TextBlock Grid.Column="0" Text="Last Checked:" Style="{StaticResource InfoKey}"/>
-                        <TextBlock Grid.Column="1" x:Name="lblLastChecked" Text="—" Style="{StaticResource InfoVal}"/>
+                        <TextBlock Grid.Column="1" x:Name="lblLastChecked" Text="—" Style="{StaticResource InfoVal}" ToolTip="The exact date and time the manager last contacted the Minecraft API for updates."/>
                     </Grid>
                 </StackPanel>
             </Grid>
@@ -306,20 +309,20 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <WrapPanel Grid.Column="0" VerticalAlignment="Center">
-                    <CheckBox x:Name="chkAutoStart" Content="Auto-start after update" Style="{StaticResource SettingsCheckBox}" IsChecked="True"/>
-                    <CheckBox x:Name="chkAutoLaunch" Content="Auto-launch on GUI start" Style="{StaticResource SettingsCheckBox}" IsChecked="False"/>
-                    <CheckBox x:Name="chkCrashProtect" Content="Crash Protection" Style="{StaticResource SettingsCheckBox}" IsChecked="True"/>
-                    <CheckBox x:Name="chkAutoCheckUpdates" Content="Check every:" Style="{StaticResource SettingsCheckBox}" IsChecked="True"/>
-                    <TextBox x:Name="txtInterval" Width="30" Text="24" VerticalAlignment="Center" Style="{StaticResource LightTextBox}" Padding="3,4"/>
+                    <CheckBox x:Name="chkAutoStart" Content="Auto-start after update" Style="{StaticResource SettingsCheckBox}" IsChecked="True" ToolTip="If checked, the server will automatically launch immediately after a fresh install or update is applied."/>
+                    <CheckBox x:Name="chkAutoLaunch" Content="Auto-launch on GUI start" Style="{StaticResource SettingsCheckBox}" IsChecked="False" ToolTip="If checked, the server will start automatically whenever you open this GUI program."/>
+                    <CheckBox x:Name="chkCrashProtect" Content="Crash Protection" Style="{StaticResource SettingsCheckBox}" IsChecked="True" ToolTip="If checked, the manager will monitor the server and automatically restart it within seconds if it crashes or closes unexpectedly."/>
+                    <CheckBox x:Name="chkAutoCheckUpdates" Content="Check every:" Style="{StaticResource SettingsCheckBox}" IsChecked="True" ToolTip="If checked, the manager will automatically check Minecraft.net for new server versions on a schedule."/>
+                    <TextBox x:Name="txtInterval" Width="30" Text="24" VerticalAlignment="Center" Style="{StaticResource LightTextBox}" Padding="3,4" ToolTip="How often to check for updates (in hours). Minimum is 1 hour."/>
                     <TextBlock Text="hrs" VerticalAlignment="Center" Margin="4,0,15,0" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
-                    <CheckBox x:Name="chkAutoApplyUpdates" Content="Auto-apply" Style="{StaticResource SettingsCheckBox}" IsChecked="False"/>
-                    <TextBlock Text="Keep Logs:" VerticalAlignment="Center" Margin="0,0,4,0" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
-                    <TextBox x:Name="txtLogRetention" Width="30" Text="30" VerticalAlignment="Center" Style="{StaticResource LightTextBox}" Padding="3,4"/>
+                    <CheckBox x:Name="chkAutoApplyUpdates" Content="Auto-apply" Style="{StaticResource SettingsCheckBox}" IsChecked="False" ToolTip="If checked, the manager will automatically download and install updates without asking. A backup is made first."/>
+                    <TextBlock Text="Keep Logs:" VerticalAlignment="Center" Margin="0,0,4,0" Foreground="{StaticResource TextSecondary}" FontSize="11" ToolTip="Manager log files older than this will be permanently deleted to save disk space."/>
+                    <TextBox x:Name="txtLogRetention" Width="30" Text="30" VerticalAlignment="Center" Style="{StaticResource LightTextBox}" Padding="3,4" ToolTip="Number of days to keep log files. (e.g., 30 means logs older than 30 days are deleted)."/>
                     <TextBlock Text="days" VerticalAlignment="Center" Margin="4,0,15,0" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
-                    <TextBlock Text="Keep Backups:" VerticalAlignment="Center" Margin="0,0,4,0" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
-                    <TextBox x:Name="txtMaxBackups" Width="30" Text="15" VerticalAlignment="Center" Style="{StaticResource LightTextBox}" Padding="3,4"/>
+                    <TextBlock Text="Keep Backups:" VerticalAlignment="Center" Margin="0,0,4,0" Foreground="{StaticResource TextSecondary}" FontSize="11" ToolTip="The maximum number of configuration backups to keep. Older revisions are deleted."/>
+                    <TextBox x:Name="txtMaxBackups" Width="30" Text="15" VerticalAlignment="Center" Style="{StaticResource LightTextBox}" Padding="3,4" ToolTip="Maximum number of backup folders to retain. (e.g., 15 means the oldest ones are purged when the 16th is created)."/>
                 </WrapPanel>
-                <Button Grid.Column="1" x:Name="btnApplySettings" Content="Apply Settings" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}"/>
+                <Button Grid.Column="1" x:Name="btnApplySettings" Content="Apply Settings" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}" ToolTip="Save all current settings and apply them immediately. Settings are also saved automatically when closing the program."/>
             </Grid>
         </Border>
 
@@ -331,14 +334,14 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <WrapPanel Grid.Column="0" VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <Button x:Name="btnFirstSetup" Content="⬇ Setup / Install" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}"/>
-                    <Button x:Name="btnCheckUpdate" Content="🔍 Check Updates" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}"/>
-                    <Button x:Name="btnUpdate" Content="⬆ Download and Update" Background="{StaticResource AccentGreen}" Style="{StaticResource ActionButton}" IsEnabled="False"/>
-                    <Button x:Name="btnStartServer" Content="▶ Start Server" Background="{StaticResource AccentGreen}" Style="{StaticResource ActionButton}"/>
-                    <Button x:Name="btnStopServer" Content="■ Stop Server" Background="{StaticResource AccentRed}" Style="{StaticResource ActionButton}"/>
-                    <Button x:Name="btnRefresh" Content="↻ Refresh Status" Background="{StaticResource AccentOrange}" Style="{StaticResource ActionButton}"/>
+                    <Button x:Name="btnFirstSetup" Content="⬇ Setup / Install" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}" ToolTip="Download and install the Minecraft Bedrock Server for the first time into the Server directory."/>
+                    <Button x:Name="btnCheckUpdate" Content="🔍 Check Updates" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}" ToolTip="Manually ask Mojang's servers if a newer version of the Bedrock Server is available."/>
+                    <Button x:Name="btnUpdate" Content="⬆ Download and Update" Background="{StaticResource AccentGreen}" Style="{StaticResource ActionButton}" IsEnabled="False" ToolTip="Download the latest server files, safely back up your current configs, and update the server."/>
+                    <Button x:Name="btnStartServer" Content="▶ Start Server" Background="{StaticResource AccentGreen}" Style="{StaticResource ActionButton}" ToolTip="Start the bedrock_server.exe process. It will launch minimized to the system tray."/>
+                    <Button x:Name="btnStopServer" Content="■ Stop Server" Background="{StaticResource AccentRed}" Style="{StaticResource ActionButton}" ToolTip="Send a stop command to the running server process to safely shut it down."/>
+                    <Button x:Name="btnRefresh" Content="↻ Refresh Status" Background="{StaticResource AccentOrange}" Style="{StaticResource ActionButton}" ToolTip="Scan the system to update the installed version, running status, and directory information."/>
                 </WrapPanel>
-                <TextBlock Grid.Column="1" x:Name="lblFooter" Text="v17.0" Foreground="{StaticResource TextMuted}" FontSize="10" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                <TextBlock Grid.Column="1" x:Name="lblFooter" Text="v18.0" Foreground="{StaticResource TextMuted}" FontSize="10" VerticalAlignment="Center" Margin="10,0,0,0"/>
             </Grid>
         </Border>
 
@@ -348,7 +351,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
-            <ProgressBar x:Name="progressBar" Grid.Row="0" Height="4" Minimum="0" Maximum="100" Value="0" Background="#E0E0E0" Foreground="{StaticResource AccentGreen}" BorderThickness="0"/>
+            <ProgressBar x:Name="progressBar" Grid.Row="0" Height="4" Minimum="0" Maximum="100" Value="0" Background="#E0E0E0" Foreground="{StaticResource AccentGreen}" BorderThickness="0" ToolTip="Shows the progress of downloads, extractions, and backups."/>
             <TextBlock x:Name="lblProgressText" Grid.Row="1" Text="" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="4,2,0,0" Visibility="Collapsed"/>
         </Grid>
 
@@ -365,11 +368,11 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Text="Console Output" Foreground="{StaticResource TextPrimary}" FontSize="11" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
-                        <Button Grid.Column="1" x:Name="btnClearLog" Content="Clear" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" Padding="10,4"/>
+                        <TextBlock Grid.Column="0" Text="Console Output" Foreground="{StaticResource TextPrimary}" FontSize="11" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0" ToolTip="Real-time log of manager actions and server status. Only the last 500 lines are kept in memory to ensure performance."/>
+                        <Button Grid.Column="1" x:Name="btnClearLog" Content="Clear" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" Padding="10,4" ToolTip="Clear all text currently displayed in the Console Output window."/>
                     </Grid>
                 </Border>
-                <RichTextBox x:Name="rtbLog" Grid.Row="1" Background="#012456" Foreground="#EEEEEE" BorderThickness="0" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" FontFamily="Consolas,Courier New" FontSize="11" Padding="8,6">
+                <RichTextBox x:Name="rtbLog" Grid.Row="1" Background="#012456" Foreground="#EEEEEE" BorderThickness="0" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" FontFamily="Consolas,Courier New" FontSize="11" Padding="8,6" ToolTip="Manager console log. Note: Server gameplay chat and commands are not shown here; they appear in the server's own minimized window.">
                     <RichTextBox.Resources>
                         <Style TargetType="Paragraph">
                             <Setter Property="Margin" Value="0,1,0,1"/>
@@ -1511,7 +1514,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
         $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         Append-LogLine "$now [SYSTEM ] ═══════════════════════════════════════════" "SYSTEM"
-        Append-LogLine "$now [SYSTEM ]   Minecraft Bedrock Server Manager v17.0"    "SUCCESS"
+        Append-LogLine "$now [SYSTEM ]   Minecraft Bedrock Server Manager v18.0"    "SUCCESS"
         Append-LogLine "$now [SYSTEM ]   PowerShell $($PSVersionTable.PSVersion)"   "SYSTEM"
         Append-LogLine "$now [SYSTEM ] ═══════════════════════════════════════════" "SYSTEM"
 
