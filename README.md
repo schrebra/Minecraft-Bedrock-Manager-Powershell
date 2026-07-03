@@ -1,40 +1,41 @@
-# Minecraft Bedrock Server Manager
-
-A simple, graphical control panel for setting up, running, and maintaining a Minecraft Bedrock Dedicated Server on Windows. It replaces manual command-line tasks, manual file downloads, and messy configuration updates with an automated, easy-to-use desktop application interface.
-
-<img width="60%" alt="image" src="https://github.com/user-attachments/assets/ec3552e2-4452-4b66-83d9-aa419c25ccbe" />
-
-
+# Minecraft Bedrock Server Manager — GUI Edition
 
 ## What It Is
-Hosting a private multiplayer world for Minecraft Bedrock Edition (the version used on Windows 10/11, iOS, Android, and consoles) normally requires you to manually download ZIP archives from Mojang, track version changes, manage your own backups, and keep a simple command-line window open at all times. 
 
-This PowerShell-based utility provides a visual dashboard to handle all of those background tasks automatically. It features a clean window with progress bars, status indicators, and a built-in server log reader so you can easily see what is happening with your server in real-time without having to type commands.
+The **Minecraft Bedrock Server Manager** is a standalone, lightweight PowerShell script that deploys a native WPF/XAML graphical user interface (GUI) to manage a Minecraft Bedrock Dedicated Server on Windows. It requires zero third-party dependencies or installations—just standard Windows PowerShell 5.1. 
+
+<img width="60%" alt="image" src="https://github.com/user-attachments/assets/6b457f0b-0322-4945-a378-61a6df757277" />
+
+
+## What It Does
+
+This tool automates the entire lifecycle of running a Windows Bedrock server. From the initial click, it reaches out to the official Mojang/Minecraft API, downloads the latest dedicated server files, and configures a clean local directory structure. Once running, it monitors the server process, handles graceful shutdowns, tracks PC and server uptime, and provides a real-time console log of system events.
+
+It operates using a strict, clean folder hierarchy (defaulting to `C:\Bedrock`):
+* `\Server` - The active Minecraft server binaries and world data.
+* `\Backups` - Compressed `.zip` archives of your worlds and configurations.
+* `\Logs` - Daily rolling manager logs.
+* `\UpdateTemp` - Temporary staging for safe updates.
 
 ## Why You Should Use It
-Managing a dedicated server manually can be tedious and prone to user error, especially when game updates release frequently. This manager is designed to let you set up your server once and let it run hands-off for weeks or months at a time.
 
-### 1. Eliminates Version Mismatch Errors
-Minecraft Bedrock is frequently updated, and if your server version does not exactly match your players' game version, they will be blocked from joining. The manager regularly checks the official Minecraft services for new server updates. You can set it to simply notify you, or have it automatically download, install, and restart the server with the new version so your friends are never locked out of the game.
+Running a vanilla Minecraft Bedrock server manually requires constant maintenance. Updates are frequent, and missing one means players on updated clients cannot join. Furthermore, command-line execution lacks native crash monitoring, and backing up world data usually requires writing custom scripts. 
 
-### 2. Smart Crash Protection
-If your server crashes, runs out of memory, or closes unexpectedly while you are asleep or away from your computer, your multiplayer world goes offline. The manager includes a Crash Protection feature that actively monitors the game in the background. If the server goes down, the utility instantly detects the failure and reboots it within seconds.
+You should use this manager if you want a **"set it and forget it"** solution optimized for long-term stability (weeks or months of uptime). It takes the manual labor out of server hosting by providing an intuitive dashboard that handles backups, crash recovery, and updates automatically, ensuring your server remains online, secure, and up-to-date with zero manual intervention.
 
-### 3. Safe, Automated Backups
-When upgrading a server manually, it is very easy to accidentally overwrite your server settings or player allowlists. Whenever the manager applies a game update, it automatically creates a timestamped copy of your core configuration files (such as `server.properties`, `allowlist.json`, and `permissions.json`). It also manages your hard drive space by automatically deleting old backups once you reach a limit you configure.
+## Features
 
-### 4. Zero-Hassle Installation
-First-time setup takes just one click. You simply choose a folder on your computer (for example, `C:\Bedrock`), and the manager will download the latest server files, verify them to ensure they aren't corrupted, extract them, and organize everything into a clean folder structure. It separates your game files, backups, and logs so your folders never become cluttered.
+* **One-Click Setup & Installation:** No need to manually download or extract `.zip` files from the official site. The manager fetches the latest production-ready version directly from Mojang.
+* **Automated Updates:** Continuously polls the Minecraft API for new releases (customizable check intervals). It can notify you of updates or be configured to automatically download, backup, and apply them.
+* **Smart Backups & Restore:** Automatically creates full `.zip` archives of your `worlds` folder and critical configurations (`server.properties`, `allowlist.json`, `permissions.json`) before any update. Includes automated retention policies (e.g., keep the last 3 backups) and a 1-click restore function.
+* **Active Crash Protection:** Monitors the `bedrock_server.exe` process. If the server crashes or closes unexpectedly, the manager instantly detects the failure and attempts a safe recovery/restart.
+* **Static IP Auto-Configuration:** Automatically detects if your host machine is using a dynamic (DHCP) IP address and can seamlessly elevate privileges to assign a Static IP, preventing player connection issues when your PC reboots.
+* **Live Dashboard & Analytics:** Displays real-time metrics including installed vs. latest versions, PC uptime, Server uptime, active listening IP/Port, and the time of the last successful backup.
+* **Built-in Console Logging:** Features a scrolling, color-coded internal log window to track system events, update statuses, and errors, automatically writing to daily rolling log files.
+* **Low Overhead:** Runs a minimized server process and utilizes highly optimized PowerShell garbage collection to ensure the GUI itself consumes minimal system resources over long uptimes.
 
-### 5. Customizable Settings
-The interface allows you to tailor the automation to your needs:
-* Choose exactly how often the program checks for game updates (e.g., every 12 or 24 hours).
-* Toggle whether updates apply automatically or wait for your manual approval.
-* Choose whether the server should automatically turn on when you open the manager application.
-* Set how many days of server logs and backup files to keep on your hard drive before they are automatically cleaned up to save space.
+## Requirements
 
-## Requirements and Setup
-* **Operating System:** Windows 10, Windows 11, or Windows Server.
-* **Prerequisite:** PowerShell 5.1 (Built into modern Windows by default).
-
-To use it, simply save the script to your computer, open PowerShell as an Administrator, and run the file. From the graphical window, select where you want your server saved, click "Setup / Install", and the manager will handle the rest.
+* Windows 10 / Windows 11 / Windows Server
+* Windows PowerShell 5.1 (`#Requires -Version 5.1`)
+* Administrator privileges (Optional, but required if you want the tool to automatically configure a Static IP).
