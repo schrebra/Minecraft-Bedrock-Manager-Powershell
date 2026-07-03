@@ -6,7 +6,6 @@ The **Minecraft Bedrock Server Manager** is a standalone, lightweight PowerShell
 
 <img width="60%" alt="image" src="https://github.com/user-attachments/assets/2f071c9e-ad28-4010-84b5-7ea85fce6310" />
 
-
 ## What It Does
 
 This tool automates the entire lifecycle of running a Windows Bedrock server. From the initial click, it reaches out to the official Mojang/Minecraft API, downloads the latest dedicated server files, and configures a clean local directory structure. Once running, it monitors the server process, handles graceful shutdowns, tracks PC and server uptime, and provides a real-time console log of system events.
@@ -23,6 +22,14 @@ Running a vanilla Minecraft Bedrock server manually requires constant maintenanc
 
 You should use this manager if you want a **"set it and forget it"** solution optimized for long-term stability (weeks or months of uptime). It takes the manual labor out of server hosting by providing an intuitive dashboard that handles backups, crash recovery, and updates automatically, ensuring your server remains online, secure, and up-to-date with zero manual intervention.
 
+## What's New in Version 27.4
+
+The latest production-ready release introduces deep stability enhancements and system intelligence automation:
+* **Automated Runtime Setup:** Automatically checks your registry for required Microsoft Visual C++ dependencies. If missing, it downloads and performs a silent installation so the server can boot flawlessly.
+* **Intelligent Network Filtering:** The network configuration logic now intelligently filters out virtual adapters (VMware, VirtualBox, and Hyper-V vEthernet switches) to guarantee accurate connection status and static IP mapping.
+* **Persistent Settings (INI Engine):** Your dashboard configurations are now saved permanently to a localized configuration profile (`%APPDATA%`), preserving your preferences between reboots.
+* **Extended Boot-Grace Window:** Added an extended initialization safety buffer (up to 45 seconds) to accommodate slower hard drives and initial Windows Firewall permission checks without flagging a false startup failure.
+
 ## Features
 
 * **One-Click Setup & Installation:** No need to manually download or extract `.zip` files from the official site. The manager fetches the latest production-ready version directly from Mojang.
@@ -38,4 +45,4 @@ You should use this manager if you want a **"set it and forget it"** solution op
 
 * Windows 10 / Windows 11 / Windows Server
 * Windows PowerShell 5.1 (`#Requires -Version 5.1`)
-* Administrator privileges (Optional, but required if you want the tool to automatically configure a Static IP).
+* Administrator privileges (Optional, but required if you want the tool to automatically configure a Static IP, manage the Windows Firewall rules, or install missing VC++ runtime dependencies).
