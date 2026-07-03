@@ -1,4 +1,4 @@
-# Minecraft Bedrock Server Manager — GUI Edition
+# Minecraft Bedrock Server Manager
 
 ## What It Is
 
