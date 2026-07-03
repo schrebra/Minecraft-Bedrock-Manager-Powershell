@@ -46,3 +46,14 @@ The latest production-ready release introduces deep stability enhancements and s
 * Windows 10 / Windows 11 / Windows Server
 * Windows PowerShell 5.1 (`#Requires -Version 5.1`)
 * Administrator privileges (Optional, but required if you want the tool to automatically configure a Static IP, manage the Windows Firewall rules, or install missing VC++ runtime dependencies).
+
+## How to Allow Players to Join
+
+Once your Minecraft server has successfully started, follow these quick steps to let others connect:
+
+1. **Open** your server console window.
+2. **Type** the following command exactly as shown:
+   `allowlist off`
+3. **Press** Enter.
+
+> **Note:** This disables the allowlist, meaning anyone with your server's IP address will now be able to join!
