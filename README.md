@@ -2,7 +2,8 @@
 
 A simple, graphical control panel for setting up, running, and maintaining a Minecraft Bedrock Dedicated Server on Windows. It replaces manual command-line tasks, manual file downloads, and messy configuration updates with an automated, easy-to-use desktop application interface.
 
-<img width="60%" alt="image" src="https://github.com/user-attachments/assets/f821d38d-a260-470e-8698-20fd4dc9e519" />
+<img width="60%" alt="image" src="https://github.com/user-attachments/assets/ec3552e2-4452-4b66-83d9-aa419c25ccbe" />
+
 
 
 ## What It Is
