@@ -14,7 +14,7 @@
     C:\Bedrock\UpdateTemp   (Temporary download/extraction files)
 
 .VERSION
-    27.0
+    27.4
 #>
 
 param(
@@ -22,10 +22,27 @@ param(
     [switch]$ApplyStaticIp
 )
 
-# ─── Pre-GUI Auto-Elevation Logic ─────────────────────────────────────────────
+# ─── Pre-GUI Admin Logic & Dependencies ───────────────────────────────────────
+Add-Type -AssemblyName System.Windows.Forms
+
 function Test-IsAdmin {
     $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     return $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Test-VcRedistInstalled {
+    # Registry check is the most reliable way to avoid 32/64-bit file path redirection issues
+    $regPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+    )
+    foreach ($p in $regPaths) {
+        if (Test-Path $p) {
+            $val = (Get-ItemProperty $p -Name "Installed" -ErrorAction SilentlyContinue).Installed
+            if ($val -eq 1) { return $true }
+        }
+    }
+    return $false
 }
 
 function Get-DhcpAdapterInfo {
@@ -62,7 +79,7 @@ function Get-DhcpAdapterInfo {
     return $null
 }
 
-# If launched with -ApplyStaticIp (meaning it was just elevated), apply it immediately.
+# 1. If launched with -ApplyStaticIp (meaning it was just elevated), apply it immediately.
 if ($ApplyStaticIp -and (Test-IsAdmin)) {
     $dhcpInfo = Get-DhcpAdapterInfo
     if ($dhcpInfo) {
@@ -76,26 +93,93 @@ if ($ApplyStaticIp -and (Test-IsAdmin)) {
             if ($dhcpInfo.Dns) {
                 Set-DnsClientServerAddress -InterfaceAlias $dhcpInfo.Alias -ServerAddresses $dhcpInfo.Dns -ErrorAction Stop
             }
-        } catch {}
+            [System.Windows.Forms.MessageBox]::Show("Static IP configured successfully on adapter '$($dhcpInfo.Alias)'!", "Static IP Applied", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Failed to set static IP: $($_.Exception.Message)", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+        }
     }
-} elseif (-not (Test-IsAdmin)) {
-    # If not admin, check if we need to prompt for elevation
+} else {
+    # 2. Check if we need to prompt for elevation for EITHER VCRedist OR Static IP
+    $needsElevation = $false
+    $reasons = @()
+
+    if (-not (Test-VcRedistInstalled)) {
+        $reasons += "Install missing Visual C++ Redistributable"
+        $needsElevation = $true
+    }
+
     $dhcpInfo = Get-DhcpAdapterInfo
     if ($dhcpInfo) {
-        Add-Type -AssemblyName System.Windows.Forms
-        $msg = "Your active network adapter '$($dhcpInfo.Alias)' (IP: $($dhcpInfo.Ip)) is using DHCP (dynamic IP).`n`nFor a stable Minecraft server, a static IP is highly recommended so players don't have to update their IP address when your PC restarts.`n`nSetting a static IP requires Administrator privileges. Would you like to restart the Bedrock Server Manager as Administrator to apply it?`n`n(Any currently running Minecraft server will be safely stopped first.)"
-        $result = [System.Windows.Forms.MessageBox]::Show($msg, "Static IP Recommendation", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-        
-        if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
-            Stop-Process -Name "bedrock_server" -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
+        $reasons += "Set static IP for adapter '$($dhcpInfo.Alias)'"
+        $needsElevation = $true
+    }
+
+    if ($needsElevation) {
+        if (-not (Test-IsAdmin)) {
+            # We aren't Admin. Prompt to restart as Admin to fix these.
+            $msg = "The Bedrock Server Manager recommends the following actions that require Administrator privileges:`n`n"
+            foreach ($r in $reasons) { $msg += " • $r`n" }
+            $msg += "`nWould you like to restart the manager as Administrator now?`n`n(Any currently running Minecraft server will be safely stopped first.)"
             
-            $scriptPath = $PSCommandPath
-            try {
-                Start-Process powershell -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -File `"$scriptPath`" -RootPath `"$RootPath`" -ApplyStaticIp"
-                exit
-            } catch {
-                [System.Windows.Forms.MessageBox]::Show("Failed to relaunch as Administrator. You can configure the static IP manually.", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            $result = [System.Windows.Forms.MessageBox]::Show($msg, "Administrator Privileges Needed", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+            if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
+                Stop-Process -Name "bedrock_server" -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 2
+                
+                $scriptPath = $PSCommandPath
+                try {
+                    Start-Process powershell -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -File `"$scriptPath`" -RootPath `"$RootPath`" -ApplyStaticIp"
+                    exit
+                } catch {
+                    [System.Windows.Forms.MessageBox]::Show("Failed to relaunch as Administrator. You can configure these manually.", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+                }
+            }
+        } else {
+            # We ARE Admin. If VCRedist is missing, install it silently.
+            if (-not (Test-VcRedistInstalled)) {
+                try {
+                    $url = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+                    $tempFile = Join-Path $env:TEMP "vc_redist.x64.exe"
+                    
+                    Write-Host "Downloading Visual C++ Redistributable..."
+                    $ProgressPreference = 'SilentlyContinue'
+                    Invoke-WebRequest -Uri $url -OutFile $tempFile -UseBasicParsing
+                    
+                    Write-Host "Installing Visual C++ Redistributable..."
+                    $proc = Start-Process -FilePath $tempFile -ArgumentList "/install", "/passive", "/norestart" -Wait -PassThru
+                    
+                    if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) {
+                        [System.Windows.Forms.MessageBox]::Show("Visual C++ Redistributable installed successfully!", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+                    } else {
+                        [System.Windows.Forms.MessageBox]::Show("Installation failed or was cancelled.", "Warning", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+                    }
+                    Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+                } catch {
+                    [System.Windows.Forms.MessageBox]::Show("Failed to download or install the dependency: $($_.Exception.Message)", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+                }
+            }
+            
+            # If DHCP is enabled, prompt to apply Static IP now.
+            if ($dhcpInfo) {
+                $msg = "Your active network adapter '$($dhcpInfo.Alias)' (IP: $($dhcpInfo.Ip)) is using DHCP (dynamic IP).`n`nFor a stable Minecraft server, a static IP is highly recommended so players don't have to update their IP address when your PC restarts.`n`nWould you like to apply a static IP now using your current settings?"
+                $result = [System.Windows.Forms.MessageBox]::Show($msg, "Static IP Recommendation", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+                
+                if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
+                    try {
+                        Set-NetIPInterface -InterfaceAlias $dhcpInfo.Alias -Dhcp Disabled -ErrorAction Stop
+                        if ($dhcpInfo.Gateway) {
+                            New-NetIPAddress -InterfaceAlias $dhcpInfo.Alias -IPAddress $dhcpInfo.Ip -PrefixLength $dhcpInfo.Prefix -DefaultGateway $dhcpInfo.Gateway -ErrorAction Stop | Out-Null
+                        } else {
+                            New-NetIPAddress -InterfaceAlias $dhcpInfo.Alias -IPAddress $dhcpInfo.Ip -PrefixLength $dhcpInfo.Prefix -ErrorAction Stop | Out-Null
+                        }
+                        if ($dhcpInfo.Dns) {
+                            Set-DnsClientServerAddress -InterfaceAlias $dhcpInfo.Alias -ServerAddresses $dhcpInfo.Dns -ErrorAction Stop
+                        }
+                        [System.Windows.Forms.MessageBox]::Show("Static IP configured successfully!", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+                    } catch {
+                        [System.Windows.Forms.MessageBox]::Show("Failed to set static IP: $($_.Exception.Message)", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+                    }
+                }
             }
         }
     }
@@ -154,7 +238,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 <Window
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="Minecraft Bedrock Server Manager v27.0"
+    Title="Minecraft Bedrock Server Manager v27.4"
     Width="1024" Height="680"
     MinWidth="800" MinHeight="500"
     WindowStartupLocation="CenterScreen"
@@ -274,7 +358,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0">
                 <TextBlock Text="Minecraft Bedrock Server Manager" FontSize="18" FontWeight="Bold" Foreground="{StaticResource TextPrimary}"/>
-                <TextBlock Text="v27.0 Production Ready" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,2,0,0"/>
+                <TextBlock Text="v27.4 Production Ready" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,2,0,0"/>
             </StackPanel>
             <Border Grid.Column="1" Background="{StaticResource BgCard}" BorderBrush="{StaticResource BorderDefault}" BorderThickness="1" CornerRadius="4" Padding="8,5" VerticalAlignment="Center" ToolTip="Shows the time remaining until the next automatic check for server updates.">
                 <StackPanel Orientation="Horizontal">
@@ -477,7 +561,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     <Button x:Name="btnBackupNow" Content="💾 Backup Now" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" IsEnabled="False" ToolTip="Manually create a zipped backup of worlds and configs. Disabled while server is running."/>
                     <Button x:Name="btnRestoreBackup" Content="⏪ Restore Backup" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" IsEnabled="False" ToolTip="Select a backup .zip to restore. Disabled while server is running."/>
                 </WrapPanel>
-                <TextBlock Grid.Column="1" x:Name="lblFooter" Text="v27.0" Foreground="{StaticResource TextMuted}" FontSize="10" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                <TextBlock Grid.Column="1" x:Name="lblFooter" Text="v27.4" Foreground="{StaticResource TextMuted}" FontSize="10" VerticalAlignment="Center" Margin="10,0,0,0"/>
             </Grid>
         </Border>
 
@@ -890,7 +974,8 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             $exeName = [System.IO.Path]::GetFileNameWithoutExtension($sharedState.ServerExecutable)
             $exePath = Join-Path $sharedState.ServerPath $sharedState.ServerExecutable
             if (Test-Path $exePath) {
-                $proc = Get-Process -Name $exeName -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exePath }
+                # Simpler, more reliable check for crash protection
+                $proc = Get-Process -Name $exeName -ErrorAction SilentlyContinue | Select-Object -First 1
                 if (-not $proc -and $sharedState.IsRunning) {
                     $sharedState.IsRunning = $false
                     $sharedState.ServerStartTime = $null
@@ -1090,8 +1175,23 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             function Get-RunningServer {
                 $exeName = [System.IO.Path]::GetFileNameWithoutExtension($state.ServerExecutable)
                 $exePath = Join-Path $state.ServerPath $state.ServerExecutable
-                if (-not (Test-Path $exePath)) { return $null }
-                return Get-Process -Name $exeName -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exePath }
+                
+                $procs = Get-Process -Name $exeName -ErrorAction SilentlyContinue
+                if (-not $procs) { return $null }
+                
+                $procList = @($procs)
+                
+                # If only one process matches the name, just assume it's ours
+                if ($procList.Count -eq 1) { return $procList[0] }
+                
+                # If multiple match, we have to check the path
+                foreach ($p in $procList) {
+                    try {
+                        $pPath = $p.Path
+                        if ($pPath -and ($pPath -eq $exePath)) { return $p }
+                    } catch {}
+                }
+                return $null
             }
 
             function Get-AppliedVersion {
@@ -1308,7 +1408,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     return 
                 }
                 
-                # 1. Check if a server is already running (started externally or by another manager)
+                # 1. Check if a server is already running
                 $existingProc = Get-RunningServer
                 if ($existingProc) {
                     $state.IsRunning = $true
@@ -1321,6 +1421,18 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     Set-StatusLabel "lblIpPort" $connStr.IpPort "blue"
                     Write-Log "Server is already running (PID $($existingProc.Id)). Adopted process." -Level WARN
                     return
+                }
+
+                # 2. Try to create firewall rule automatically (Requires Admin)
+                try {
+                    $ruleName = "Minecraft Bedrock Server"
+                    $existingRule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+                    if (-not $existingRule) {
+                        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Program $exe -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+                        Write-Log "Created Windows Firewall rule to allow inbound traffic." -Level SYSTEM
+                    }
+                } catch {
+                    Write-Log "Could not automatically create firewall rule. Windows may prompt you to allow network access." -Level WARN
                 }
 
                 Write-Log "Starting server (minimized)…" -Level SYSTEM
@@ -1339,10 +1451,27 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     return
                 }
                 
-                # Wait for it to spin up
-                Start-Sleep -Seconds 5 
+                # 3. Wait for it to spin up (Up to 45 seconds to account for firewall prompts and slow disks)
+                Write-Log "Waiting for server to initialize (up to 45 seconds)..." -Level SYSTEM
                 
-                $runningProc = Get-RunningServer
+                $runningProc = $null
+                for ($i = 0; $i -lt 15; $i++) {
+                    Start-Sleep -Seconds 3
+                    
+                    if ($proc.HasExited) {
+                        Write-Log "Server process exited prematurely." -Level ERROR
+                        $runningProc = $null
+                        break
+                    }
+                    
+                    # Check if the process is still alive and responding
+                    $check = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+                    if ($check -and -not $check.HasExited) {
+                        $runningProc = $check
+                        break
+                    }
+                }
+                
                 if ($runningProc) {
                     $state.IsRunning = $true
                     $state.ExpectedToRun = $true
@@ -1355,8 +1484,9 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     Write-Log "Server is listening on $($connStr.Hostname) ($($connStr.IpPort))" -Level SUCCESS
                 } else {
                     $state.IsRunning = $false
+                    $state.ExpectedToRun = $false
                     Set-StatusLabel "lblServerStatus" "START FAILED" "red"
-                    Write-Log "Server process exited immediately. Check server logs for configuration errors." -Level ERROR
+                    Write-Log "Server process exited or did not respond in time. Check server logs for configuration errors." -Level ERROR
                 }
             }
 
@@ -1836,7 +1966,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             $lblSetupStatus.Foreground = $statusBrushCache["green"]
 
             $exeName = [System.IO.Path]::GetFileNameWithoutExtension($sharedState.ServerExecutable)
-            $proc    = Get-Process -Name $exeName -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe }
+            $proc    = Get-Process -Name $exeName -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($proc) {
                 $sharedState.IsRunning = $true
                 $sharedState.ExpectedToRun = $true
@@ -1890,7 +2020,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
         $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         Append-LogLine "$now [SYSTEM ] ═══════════════════════════════════════════" "SYSTEM"
-        Append-LogLine "$now [SYSTEM ]   Minecraft Bedrock Server Manager v27.0"    "SUCCESS"
+        Append-LogLine "$now [SYSTEM ]   Minecraft Bedrock Server Manager v27.4"    "SUCCESS"
         Append-LogLine "$now [SYSTEM ]   PowerShell $($PSVersionTable.PSVersion)"   "SYSTEM"
         Append-LogLine "$now [SYSTEM ] ═══════════════════════════════════════════" "SYSTEM"
 
@@ -1909,10 +2039,13 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             }
 
             if ($sharedState.AutoLaunchOnStart -and -not $sharedState.IsRunning) {
-                Append-LogLine "$now [SYSTEM ] Auto-launch enabled. Starting server..." "SYSTEM"
-                Start-BackgroundWork -Work {
-                    Set-Busy $true
-                    try { Start-ServerProcess } finally { Set-Busy $false }
+                Start-Sleep -Seconds 2
+                if (-not $sharedState.IsRunning -and -not $sharedState.IsBusy) {
+                    Append-LogLine "$now [SYSTEM ] Auto-launch enabled. Starting server..." "SYSTEM"
+                    Start-BackgroundWork -Work {
+                        Set-Busy $true
+                        try { Start-ServerProcess } finally { Set-Busy $false }
+                    }
                 }
             }
         }
