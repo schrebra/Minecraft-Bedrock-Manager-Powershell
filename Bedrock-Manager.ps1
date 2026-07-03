@@ -14,12 +14,92 @@
     C:\Bedrock\UpdateTemp   (Temporary download/extraction files)
 
 .VERSION
-    23.0
+    27.0
 #>
 
 param(
-    [string]$RootPath = ""
+    [string]$RootPath = "",
+    [switch]$ApplyStaticIp
 )
+
+# ─── Pre-GUI Auto-Elevation Logic ─────────────────────────────────────────────
+function Test-IsAdmin {
+    $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    return $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-DhcpAdapterInfo {
+    try {
+        $netAdapters = Get-NetIPConfiguration | Where-Object {
+            $_.IPv4Address -ne $null -and
+            $_.InterfaceAlias -notmatch "Loopback" -and
+            $_.InterfaceAlias -notmatch "VMware" -and
+            $_.InterfaceAlias -notmatch "VirtualBox" -and
+            $_.InterfaceAlias -notmatch "vEthernet" -and
+            $_.IPv4Address.IPAddress -notlike "169.*" -and
+            $_.IPv4Address.IPAddress -ne "127.0.0.1"
+        }
+        
+        foreach ($net in $netAdapters) {
+            $alias = $net.InterfaceAlias
+            $ipAddr = $net.IPv4Address.IPAddress
+            $dhcpStatus = (Get-NetIPInterface -InterfaceAlias $alias -AddressFamily IPv4).Dhcp
+            if ($dhcpStatus -eq 'Enabled') {
+                $prefix = (Get-NetIPAddress -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue).PrefixLength
+                $gateway = (Get-NetRoute -InterfaceAlias $alias -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Select-Object -First 1).NextHop
+                $dns = (Get-DnsClientServerAddress -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
+                
+                return @{ 
+                    Alias = $alias
+                    Ip = $ipAddr
+                    Prefix = $prefix
+                    Gateway = $gateway
+                    Dns = $dns
+                }
+            }
+        }
+    } catch { }
+    return $null
+}
+
+# If launched with -ApplyStaticIp (meaning it was just elevated), apply it immediately.
+if ($ApplyStaticIp -and (Test-IsAdmin)) {
+    $dhcpInfo = Get-DhcpAdapterInfo
+    if ($dhcpInfo) {
+        try {
+            Set-NetIPInterface -InterfaceAlias $dhcpInfo.Alias -Dhcp Disabled -ErrorAction Stop
+            if ($dhcpInfo.Gateway) {
+                New-NetIPAddress -InterfaceAlias $dhcpInfo.Alias -IPAddress $dhcpInfo.Ip -PrefixLength $dhcpInfo.Prefix -DefaultGateway $dhcpInfo.Gateway -ErrorAction Stop | Out-Null
+            } else {
+                New-NetIPAddress -InterfaceAlias $dhcpInfo.Alias -IPAddress $dhcpInfo.Ip -PrefixLength $dhcpInfo.Prefix -ErrorAction Stop | Out-Null
+            }
+            if ($dhcpInfo.Dns) {
+                Set-DnsClientServerAddress -InterfaceAlias $dhcpInfo.Alias -ServerAddresses $dhcpInfo.Dns -ErrorAction Stop
+            }
+        } catch {}
+    }
+} elseif (-not (Test-IsAdmin)) {
+    # If not admin, check if we need to prompt for elevation
+    $dhcpInfo = Get-DhcpAdapterInfo
+    if ($dhcpInfo) {
+        Add-Type -AssemblyName System.Windows.Forms
+        $msg = "Your active network adapter '$($dhcpInfo.Alias)' (IP: $($dhcpInfo.Ip)) is using DHCP (dynamic IP).`n`nFor a stable Minecraft server, a static IP is highly recommended so players don't have to update their IP address when your PC restarts.`n`nSetting a static IP requires Administrator privileges. Would you like to restart the Bedrock Server Manager as Administrator to apply it?`n`n(Any currently running Minecraft server will be safely stopped first.)"
+        $result = [System.Windows.Forms.MessageBox]::Show($msg, "Static IP Recommendation", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+        
+        if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
+            Stop-Process -Name "bedrock_server" -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            
+            $scriptPath = $PSCommandPath
+            try {
+                Start-Process powershell -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -File `"$scriptPath`" -RootPath `"$RootPath`" -ApplyStaticIp"
+                exit
+            } catch {
+                [System.Windows.Forms.MessageBox]::Show("Failed to relaunch as Administrator. You can configure the static IP manually.", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            }
+        }
+    }
+}
 
 # ─── Load Assemblies ──────────────────────────────────────────────────────────
 Add-Type -AssemblyName PresentationFramework
@@ -53,6 +133,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     IsRunning           = $false
     UpdateAvailable     = $false
     ExpectedToRun       = $false
+    ServerStartTime     = $null
     PendingMessages     = [System.Collections.ArrayList]::new()
     PendingStatus       = [System.Collections.ArrayList]::new()
     PendingProgress     = @{ Type = "none"; Value = 0 }
@@ -73,7 +154,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 <Window
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="Minecraft Bedrock Server Manager v23.0"
+    Title="Minecraft Bedrock Server Manager v27.0"
     Width="1024" Height="680"
     MinWidth="800" MinHeight="500"
     WindowStartupLocation="CenterScreen"
@@ -193,7 +274,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0">
                 <TextBlock Text="Minecraft Bedrock Server Manager" FontSize="18" FontWeight="Bold" Foreground="{StaticResource TextPrimary}"/>
-                <TextBlock Text="v23.0 Production Ready" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,2,0,0"/>
+                <TextBlock Text="v27.0 Production Ready" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,2,0,0"/>
             </StackPanel>
             <Border Grid.Column="1" Background="{StaticResource BgCard}" BorderBrush="{StaticResource BorderDefault}" BorderThickness="1" CornerRadius="4" Padding="8,5" VerticalAlignment="Center" ToolTip="Shows the time remaining until the next automatic check for server updates.">
                 <StackPanel Orientation="Horizontal">
@@ -219,47 +300,72 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             </Grid>
         </Border>
 
-        <!-- ═══ 2 · STAT CARDS ══════════════════════════════════════════════ -->
-        <UniformGrid Grid.Row="2" Columns="6">
-            <Border Style="{StaticResource Card}" ToolTip="The version of the Minecraft server currently installed in the Server folder.">
+        <!-- ═══ 2 · STAT CARDS (Redesigned for Alignment) ══════════════════ -->
+        <Grid Grid.Row="2" Margin="3,3">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="1.2*"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            
+            <!-- Card 1: Versions (Grid used for perfect alignment) -->
+            <Border Grid.Column="0" Style="{StaticResource Card}" ToolTip="The installed and latest available versions of the Minecraft server.">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    
+                    <TextBlock Grid.Row="0" Grid.ColumnSpan="2" Text="VERSIONS" Style="{StaticResource StatLabel}"/>
+                    
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Installed: " FontSize="11" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,3,0,0"/>
+                    <TextBlock Grid.Row="1" Grid.Column="1" x:Name="lblInstalled" Text="—" Style="{StaticResource StatValue}" Margin="0,3,0,0"/>
+                    
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Latest: " FontSize="11" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,4,0,0"/>
+                    <TextBlock Grid.Row="2" Grid.Column="1" x:Name="lblLatest" Text="—" Style="{StaticResource StatValue}" Foreground="{StaticResource AccentBlue}" Margin="0,4,0,0"/>
+                </Grid>
+            </Border>
+
+            <!-- Card 2: System Status -->
+            <Border Grid.Column="1" Style="{StaticResource Card}" ToolTip="Current status of the server process and installation.">
                 <StackPanel>
-                    <TextBlock Text="INSTALLED" Style="{StaticResource StatLabel}"/>
-                    <TextBlock x:Name="lblInstalled" Text="—" Style="{StaticResource StatValue}"/>
+                    <TextBlock Text="SYSTEM STATUS" Style="{StaticResource StatLabel}"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,3,0,0">
+                        <TextBlock Text="Status: " FontSize="11" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="lblServerStatus" Text="—" Style="{StaticResource StatValue}" Foreground="{StaticResource AccentOrange}"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                        <TextBlock Text="Setup: " FontSize="11" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="lblSetupStatus" Text="—" Style="{StaticResource StatValue}"/>
+                    </StackPanel>
                 </StackPanel>
             </Border>
-            <Border Style="{StaticResource Card}" ToolTip="The newest version of the server available from Mojang/Minecraft.net.">
-                <StackPanel>
-                    <TextBlock Text="LATEST" Style="{StaticResource StatLabel}"/>
-                    <TextBlock x:Name="lblLatest" Text="—" Style="{StaticResource StatValue}" Foreground="{StaticResource AccentBlue}"/>
-                </StackPanel>
-            </Border>
-            <Border Style="{StaticResource Card}" ToolTip="Current status of the bedrock_server.exe process. (Running, Stopped, Starting, etc.)">
-                <StackPanel>
-                    <TextBlock Text="STATUS" Style="{StaticResource StatLabel}"/>
-                    <TextBlock x:Name="lblServerStatus" Text="—" Style="{StaticResource StatValue}" Foreground="{StaticResource AccentOrange}"/>
-                </StackPanel>
-            </Border>
-            <Border Style="{StaticResource Card}" ToolTip="The IP address and port the server is listening on.">
+
+            <!-- Card 3: Connection -->
+            <Border Grid.Column="2" Style="{StaticResource Card}" ToolTip="The Hostname and IP address the server is listening on.">
                 <StackPanel>
                     <TextBlock Text="CONNECTION" Style="{StaticResource StatLabel}"/>
-                    <TextBlock x:Name="lblConnection" Text="—" Style="{StaticResource StatValue}" Foreground="{StaticResource AccentBlue}"/>
+                    <TextBlock x:Name="lblHostname" Text="—" Style="{StaticResource StatValue}" Margin="0,3,0,0"/>
+                    <TextBlock x:Name="lblIpPort" Text="—" Style="{StaticResource StatValue}" Foreground="{StaticResource AccentBlue}" Margin="0,4,0,0"/>
                 </StackPanel>
             </Border>
-            <Border Style="{StaticResource Card}" ToolTip="Indicates whether the server software has been successfully installed or if setup is needed.">
-                <StackPanel>
-                    <TextBlock Text="SETUP" Style="{StaticResource StatLabel}"/>
-                    <TextBlock x:Name="lblSetupStatus" Text="—" Style="{StaticResource StatValue}"/>
-                </StackPanel>
-            </Border>
-            <Border Style="{StaticResource Card}" ToolTip="Shows if your installed version is up to date or if a new update is available.">
-                <StackPanel>
-                    <TextBlock Text="UPDATE" Style="{StaticResource StatLabel}"/>
-                    <TextBlock x:Name="lblUpdateStatus" Text="—" Style="{StaticResource StatValue}" Foreground="{StaticResource AccentGray}"/>
-                </StackPanel>
-            </Border>
-        </UniformGrid>
 
-        <!-- ═══ 3 · INFO / PATHS CARD ══════════════════════════════════════ -->
+            <!-- Card 4: Update Status -->
+            <Border Grid.Column="3" Style="{StaticResource Card}" ToolTip="Shows if your installed version is up to date or if a new update is available.">
+                <StackPanel>
+                    <TextBlock Text="UPDATE STATUS" Style="{StaticResource StatLabel}"/>
+                    <TextBlock x:Name="lblUpdateStatus" Text="—" Style="{StaticResource StatValue}" Foreground="{StaticResource AccentGray}" Margin="0,3,0,0"/>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <!-- ═══ 3 · INFO / PATHS / SYSTEM CARD ═════════════════════════════ -->
         <Border Grid.Row="3" Style="{StaticResource Card}">
             <Grid>
                 <Grid.ColumnDefinitions>
@@ -267,43 +373,68 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     <ColumnDefinition Width="10"/>
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
-                <StackPanel Grid.Column="0">
-                    <Grid Margin="0,0,0,3">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="100"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Text="Server Dir:" Style="{StaticResource InfoKey}"/>
-                        <TextBlock Grid.Column="1" x:Name="lblInstallDir" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand" ToolTip="Click to open the Server directory where bedrock_server.exe is located."/>
-                    </Grid>
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="100"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Text="Backups Dir:" Style="{StaticResource InfoKey}"/>
-                        <TextBlock Grid.Column="1" x:Name="lblBackupDir" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand" ToolTip="Click to open the Backups directory where zip archives are stored."/>
-                    </Grid>
-                </StackPanel>
-                <Rectangle Grid.Column="1" Fill="{StaticResource BorderDefault}" Width="1"/>
-                <StackPanel Grid.Column="2">
-                    <Grid Margin="0,0,0,3">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="100"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Text="Logs Dir:" Style="{StaticResource InfoKey}"/>
-                        <TextBlock Grid.Column="1" x:Name="lblLogFile" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand" ToolTip="Click to open today's manager log file in Notepad."/>
-                    </Grid>
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="100"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Text="Last Checked:" Style="{StaticResource InfoKey}"/>
-                        <TextBlock Grid.Column="1" x:Name="lblLastChecked" Text="—" Style="{StaticResource InfoVal}" ToolTip="The exact date and time the manager last contacted the Minecraft API for updates."/>
-                    </Grid>
-                </StackPanel>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Row 0 -->
+                <Grid Grid.Row="0" Grid.Column="0" Margin="0,0,0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="100"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Server Dir:" Style="{StaticResource InfoKey}"/>
+                    <TextBlock Grid.Column="1" x:Name="lblInstallDir" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand" ToolTip="Click to open the Server directory."/>
+                </Grid>
+                <Rectangle Grid.Row="0" Grid.Column="1" Fill="{StaticResource BorderDefault}" Width="1" HorizontalAlignment="Center"/>
+                <Grid Grid.Row="0" Grid.Column="2" Margin="0,0,0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="100"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="PC Uptime:" Style="{StaticResource InfoKey}"/>
+                    <TextBlock Grid.Column="1" x:Name="lblPcUptime" Text="—" Style="{StaticResource InfoVal}"/>
+                </Grid>
+
+                <!-- Row 1 -->
+                <Grid Grid.Row="1" Grid.Column="0" Margin="0,0,0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="100"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Backups Dir:" Style="{StaticResource InfoKey}"/>
+                    <TextBlock Grid.Column="1" x:Name="lblBackupDir" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand" ToolTip="Click to open the Backups directory."/>
+                </Grid>
+                <Rectangle Grid.Row="1" Grid.Column="1" Fill="{StaticResource BorderDefault}" Width="1" HorizontalAlignment="Center"/>
+                <Grid Grid.Row="1" Grid.Column="2" Margin="0,0,0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="100"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Server Up:" Style="{StaticResource InfoKey}"/>
+                    <TextBlock Grid.Column="1" x:Name="lblServerUptime" Text="—" Style="{StaticResource InfoVal}"/>
+                </Grid>
+
+                <!-- Row 2 -->
+                <Grid Grid.Row="2" Grid.Column="0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="100"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Logs Dir:" Style="{StaticResource InfoKey}"/>
+                    <TextBlock Grid.Column="1" x:Name="lblLogFile" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand" ToolTip="Click to open today's manager log file."/>
+                </Grid>
+                <Rectangle Grid.Row="2" Grid.Column="1" Fill="{StaticResource BorderDefault}" Width="1" HorizontalAlignment="Center"/>
+                <Grid Grid.Row="2" Grid.Column="2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="100"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Last Backup:" Style="{StaticResource InfoKey}"/>
+                    <TextBlock Grid.Column="1" x:Name="lblLastBackup" Text="—" Style="{StaticResource InfoVal}" ToolTip="The time the last zip backup was created."/>
+                </Grid>
             </Grid>
         </Border>
 
@@ -315,14 +446,14 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <WrapPanel Grid.Column="0" VerticalAlignment="Center">
-                    <CheckBox x:Name="chkAutoStart" Content="Auto-start after update" Style="{StaticResource SettingsCheckBox}" IsChecked="True" ToolTip="If checked, the server will automatically launch immediately after a fresh install or update is applied."/>
+                    <CheckBox x:Name="chkAutoStart" Content="Auto-start after update" Style="{StaticResource SettingsCheckBox}" IsChecked="True" ToolTip="If checked, the server will automatically launch immediately after an update is applied."/>
                     <CheckBox x:Name="chkAutoLaunch" Content="Auto-launch on GUI start" Style="{StaticResource SettingsCheckBox}" IsChecked="False" ToolTip="If checked, the server will start automatically whenever you open this GUI program."/>
-                    <CheckBox x:Name="chkCrashProtect" Content="Crash Protection" Style="{StaticResource SettingsCheckBox}" IsChecked="True" ToolTip="If checked, the manager will monitor the server and automatically restart it within seconds if it crashes or closes unexpectedly."/>
-                    <CheckBox x:Name="chkAutoCheckUpdates" Content="Check every:" Style="{StaticResource SettingsCheckBox}" IsChecked="True" ToolTip="If checked, the manager will automatically check Minecraft.net for new server versions on a schedule."/>
-                    <TextBox x:Name="txtInterval" Width="35" Text="24" VerticalAlignment="Center" Style="{StaticResource LightTextBox}" Padding="3,4" ToolTip="How often to check for updates (in hours). Minimum is 1 hour."/>
+                    <CheckBox x:Name="chkCrashProtect" Content="Crash Protection" Style="{StaticResource SettingsCheckBox}" IsChecked="True" ToolTip="If checked, the manager will automatically restart the server if it crashes."/>
+                    <CheckBox x:Name="chkAutoCheckUpdates" Content="Check every:" Style="{StaticResource SettingsCheckBox}" IsChecked="True" ToolTip="If checked, the manager will automatically check Minecraft.net for new server versions."/>
+                    <TextBox x:Name="txtInterval" Width="35" Text="24" VerticalAlignment="Center" Style="{StaticResource LightTextBox}" Padding="3,4" ToolTip="How often to check for updates (in hours)."/>
                     <TextBlock Text="hrs" VerticalAlignment="Center" Margin="4,0,15,0" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
-                    <CheckBox x:Name="chkAutoApplyUpdates" Content="Auto-apply" Style="{StaticResource SettingsCheckBox}" IsChecked="False" ToolTip="If checked, the manager will automatically download and install updates without asking. A backup is made first."/>
-                    <TextBlock Text="Keep Backups:" VerticalAlignment="Center" Margin="15,0,4,0" Foreground="{StaticResource TextSecondary}" FontSize="11" ToolTip="The maximum number of zip archives to keep. Older archives are deleted."/>
+                    <CheckBox x:Name="chkAutoApplyUpdates" Content="Auto-apply" Style="{StaticResource SettingsCheckBox}" IsChecked="False" ToolTip="If checked, the manager will automatically download and install updates without asking."/>
+                    <TextBlock Text="Keep Backups:" VerticalAlignment="Center" Margin="15,0,4,0" Foreground="{StaticResource TextSecondary}" FontSize="11" ToolTip="The maximum number of zip archives to keep."/>
                     <TextBox x:Name="txtMaxBackups" Width="35" Text="3" VerticalAlignment="Center" Style="{StaticResource LightTextBox}" Padding="3,4" ToolTip="Maximum number of zip backup files to retain."/>
                 </WrapPanel>
                 <Button Grid.Column="1" x:Name="btnApplySettings" Content="Apply Settings" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}"/>
@@ -337,16 +468,16 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <WrapPanel Grid.Column="0" VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <Button x:Name="btnFirstSetup" Content="⬇ Setup / Install" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}" ToolTip="Download and install the Minecraft Bedrock Server for the first time into the Server directory."/>
-                    <Button x:Name="btnCheckUpdate" Content="🔍 Check Updates" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}" ToolTip="Manually ask Mojang's servers if a newer version of the Bedrock Server is available."/>
-                    <Button x:Name="btnUpdate" Content="⬆ Download and Update" Background="{StaticResource AccentGreen}" Style="{StaticResource ActionButton}" IsEnabled="False" ToolTip="Download the latest server files, safely back up your current configs and worlds, and update the server."/>
-                    <Button x:Name="btnStartServer" Content="▶ Start Server" Background="{StaticResource AccentGreen}" Style="{StaticResource ActionButton}" ToolTip="Start the bedrock_server.exe process. It will launch minimized to the system tray."/>
-                    <Button x:Name="btnStopServer" Content="■ Stop Server" Background="{StaticResource AccentRed}" Style="{StaticResource ActionButton}" ToolTip="Send a stop command to the running server process to safely shut it down."/>
-                    <Button x:Name="btnRefresh" Content="↻ Refresh Status" Background="{StaticResource AccentOrange}" Style="{StaticResource ActionButton}" ToolTip="Scan the system to update the installed version, running status, and directory information."/>
-                    <Button x:Name="btnBackupNow" Content="💾 Backup Now" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" IsEnabled="False" ToolTip="Manually create a zipped backup of your worlds and configuration files. Disabled while the server is running to prevent locked file corruption."/>
-                    <Button x:Name="btnRestoreBackup" Content="⏪ Restore Backup" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" IsEnabled="False" ToolTip="Select a date-stamped backup .zip file to restore. This will overwrite existing files. Disabled while the server is running."/>
+                    <Button x:Name="btnFirstSetup" Content="⬇ Setup / Install" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}" ToolTip="Download and install the Minecraft Bedrock Server for the first time."/>
+                    <Button x:Name="btnCheckUpdate" Content="🔍 Check Updates" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}" ToolTip="Manually ask Mojang's servers if a newer version is available."/>
+                    <Button x:Name="btnUpdate" Content="⬆ Download and Update" Background="{StaticResource AccentGreen}" Style="{StaticResource ActionButton}" IsEnabled="False" ToolTip="Download the latest server files, safely back up configs and worlds, and update."/>
+                    <Button x:Name="btnStartServer" Content="▶ Start Server" Background="{StaticResource AccentGreen}" Style="{StaticResource ActionButton}" ToolTip="Start the bedrock_server.exe process. It will launch minimized."/>
+                    <Button x:Name="btnStopServer" Content="■ Stop Server" Background="{StaticResource AccentRed}" Style="{StaticResource ActionButton}" ToolTip="Send a stop command to the running server process."/>
+                    <Button x:Name="btnRefresh" Content="↻ Refresh Status" Background="{StaticResource AccentOrange}" Style="{StaticResource ActionButton}" ToolTip="Scan the system to update installed version, running status, and directories."/>
+                    <Button x:Name="btnBackupNow" Content="💾 Backup Now" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" IsEnabled="False" ToolTip="Manually create a zipped backup of worlds and configs. Disabled while server is running."/>
+                    <Button x:Name="btnRestoreBackup" Content="⏪ Restore Backup" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" IsEnabled="False" ToolTip="Select a backup .zip to restore. Disabled while server is running."/>
                 </WrapPanel>
-                <TextBlock Grid.Column="1" x:Name="lblFooter" Text="v23.0" Foreground="{StaticResource TextMuted}" FontSize="10" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                <TextBlock Grid.Column="1" x:Name="lblFooter" Text="v27.0" Foreground="{StaticResource TextMuted}" FontSize="10" VerticalAlignment="Center" Margin="10,0,0,0"/>
             </Grid>
         </Border>
 
@@ -471,16 +602,22 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     $txtRootPath         = $window.FindName("txtRootPath")
     $btnBrowse           = $window.FindName("btnBrowse")
     $btnOpenFolder       = $window.FindName("btnOpenFolder")
+    
     $lblInstalled        = $window.FindName("lblInstalled")
     $lblLatest           = $window.FindName("lblLatest")
     $lblServerStatus     = $window.FindName("lblServerStatus")
-    $lblConnection       = $window.FindName("lblConnection")
+    $lblHostname         = $window.FindName("lblHostname")
+    $lblIpPort           = $window.FindName("lblIpPort")
     $lblSetupStatus      = $window.FindName("lblSetupStatus")
     $lblUpdateStatus     = $window.FindName("lblUpdateStatus")
+    
     $lblInstallDir       = $window.FindName("lblInstallDir")
     $lblBackupDir        = $window.FindName("lblBackupDir")
+    $lblPcUptime         = $window.FindName("lblPcUptime")
     $lblLogFile          = $window.FindName("lblLogFile")
-    $lblLastChecked      = $window.FindName("lblLastChecked")
+    $lblServerUptime     = $window.FindName("lblServerUptime")
+    $lblLastBackup       = $window.FindName("lblLastBackup")
+    
     $lblNextCheck        = $window.FindName("lblNextCheck")
     $dotPeriodic         = $window.FindName("dotPeriodic")
     $progressBar         = $window.FindName("progressBar")
@@ -516,6 +653,8 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     $txtInterval.Text             = $sharedState.UpdateCheckHours
     $txtMaxBackups.Text           = $sharedState.MaxBackups
 
+    $lblHostname.Text = [System.Net.Dns]::GetHostName()
+
     # Event Handlers for path labels
     $lblInstallDir.Add_MouseLeftButtonUp({
         $p = $sharedState.ServerPath
@@ -539,7 +678,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     }
     Update-PathLabels
 
-    # Pre-Freeze Brushes to prevent WPF Memory Leaks over long durations
+    # Pre-Freeze Brushes
     $colourMap = @{
         "INFO"     = "#EEEEEE"
         "WARN"     = "#FFB347"
@@ -597,7 +736,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             $txtRootPath.IsEnabled    = $true
             $btnApplySettings.IsEnabled = $true
             
-            # Strict Backup/Restore Lockouts: Only allow if installed AND server is fully stopped
             $canBackupRestore = $sharedState.IsInstalled -and -not $sharedState.IsRunning
             $btnBackupNow.IsEnabled     = $canBackupRestore
             $btnRestoreBackup.IsEnabled = $canBackupRestore
@@ -607,6 +745,9 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     $script:activeJobs = [System.Collections.ArrayList]::new()
     $script:nextUpdateCheck = [datetime]::Now.AddHours($sharedState.UpdateCheckHours)
     $script:lastGcTime = [datetime]::Now
+    
+    $script:pcBootTime = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+    $script:tickCount = 0
 
     $timer = New-Object System.Windows.Threading.DispatcherTimer
     $timer.Interval = [TimeSpan]::FromMilliseconds(500)
@@ -709,7 +850,42 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
         }
         Update-ButtonStates
 
-        # 5. Crash Protection Monitor
+        # 5. Dashboard Updates (Every 5 seconds / 10 ticks)
+        $script:tickCount++
+        if ($script:tickCount % 10 -eq 0) {
+            # Update PC Uptime
+            if ($script:pcBootTime) {
+                $pcUp = [timespan]([datetime]::Now - $script:pcBootTime)
+                $lblPcUptime.Text = "{0}d {1}h {2}m" -f $pcUp.Days, $pcUp.Hours, $pcUp.Minutes
+            }
+
+            # Update Server Uptime
+            if ($sharedState.IsRunning -and $sharedState.ServerStartTime) {
+                try {
+                    $srvUp = [timespan]([datetime]::Now - $sharedState.ServerStartTime)
+                    $lblServerUptime.Text = "{0}d {1}h {2}m" -f $srvUp.Days, $srvUp.Hours, $srvUp.Minutes
+                } catch {
+                    $lblServerUptime.Text = "—"
+                }
+            } else {
+                $lblServerUptime.Text = "—"
+            }
+
+            # Update Last Backup Time
+            $backupRoot = $sharedState.BackupPath
+            if (Test-Path $backupRoot) {
+                $latestZip = Get-ChildItem $backupRoot -Filter "full_backup_*.zip" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                if ($latestZip) {
+                    $lblLastBackup.Text = $latestZip.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
+                } else {
+                    $lblLastBackup.Text = "None"
+                }
+            } else {
+                $lblLastBackup.Text = "None"
+            }
+        }
+
+        # 6. Crash Protection Monitor
         if (-not $sharedState.IsBusy -and $sharedState.ExpectedToRun -and $sharedState.CrashProtection) {
             $exeName = [System.IO.Path]::GetFileNameWithoutExtension($sharedState.ServerExecutable)
             $exePath = Join-Path $sharedState.ServerPath $sharedState.ServerExecutable
@@ -717,6 +893,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 $proc = Get-Process -Name $exeName -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exePath }
                 if (-not $proc -and $sharedState.IsRunning) {
                     $sharedState.IsRunning = $false
+                    $sharedState.ServerStartTime = $null
                     $errBrush = $brushCache["ERROR"]
                     $redBrush = $statusBrushCache["red"]
                     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
@@ -738,7 +915,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             }
         }
 
-        # 6. Periodic Update Check Monitor
+        # 7. Periodic Update Check Monitor
         if ($sharedState.AutoCheckUpdates -and -not $sharedState.IsBusy) {
             $ts = $script:nextUpdateCheck - [datetime]::Now
             if ($ts.TotalSeconds -le 0) {
@@ -760,7 +937,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             $dotPeriodic.Fill = $statusBrushCache["gray"]
         }
 
-        # 7. Cleanup completed background jobs
+        # 8. Cleanup completed background jobs
         if ($script:activeJobs.Count -gt 0) {
             $completed = @()
             foreach ($job in $script:activeJobs) {
@@ -779,7 +956,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             }
         }
 
-        # 8. Garbage Collection (Every 5 minutes)
+        # 9. Garbage Collection (Every 5 minutes)
         if (([datetime]::Now - $script:lastGcTime).TotalMinutes -ge 5) {
             $script:lastGcTime = [datetime]::Now
             [System.GC]::Collect()
@@ -848,7 +1025,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
     $btnClearLog.Add_Click({ $rtbLog.Document.Blocks.Clear() })
 
-    # Helper for UI Logging (Thread-Safe via Timer)
     function Append-LogLine {
         param([string]$text, [string]$colour)
         [System.Threading.Monitor]::Enter($sharedState.PendingMessages.SyncRoot)
@@ -867,7 +1043,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
         $bgPS = [PowerShell]::Create()
         $bgPS.Runspace = $bgRS
 
-        $bgPS.AddScript({
+        $helperScript = {
             function Write-Log {
                 param([string]$Message, [string]$Level = "INFO")
                 $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -885,7 +1061,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     
                     Add-Content -Path $logPath -Value $entry -ErrorAction SilentlyContinue
                     
-                    # Purge old logs
                     Get-ChildItem -Path $logDir -Filter "BedrockServerManager_*.log" -ErrorAction SilentlyContinue | 
                         Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$state.LogRetentionDays) } | 
                         Remove-Item -Force -ErrorAction SilentlyContinue
@@ -979,15 +1154,15 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 }
                 $state.IsRunning = $false
                 $state.ExpectedToRun = $false
+                $state.ServerStartTime = $null
                 Write-Log "Server stopped." -Level SUCCESS
                 Set-StatusLabel "lblServerStatus" "STOPPED" "red"
-                Set-StatusLabel "lblConnection" "—" "gray"
+                Set-StatusLabel "lblIpPort" "—" "gray"
             }
 
             function Backup-All {
                 param([bool]$IsManual = $false)
                 
-                # Defense in depth: Never allow backup if server is running
                 if (Get-RunningServer) {
                     Write-Log "Cannot backup while server is running. Stop the server first." -Level ERROR
                     return
@@ -998,7 +1173,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 $backupRoot = $state.BackupPath
                 if (-not (Test-Path $backupRoot)) { New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null }
                 
-                # Include milliseconds in timestamp to prevent filename collisions if button is clicked rapidly
                 $timeStr = Get-Date -Format 'yyyyMMdd_HHmmssfff'
                 $zipName = "full_backup_$timeStr.zip"
                 $zipPath = Join-Path $backupRoot $zipName
@@ -1007,13 +1181,11 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 if (-not (Test-Path $stageDir)) { New-Item -ItemType Directory -Path $stageDir -Force | Out-Null }
 
                 try {
-                    # 1. Copy Configs
                     foreach ($f in $state.FilesToBackup) {
                         $src = Join-Path $state.ServerPath $f
                         if (Test-Path $src) { Copy-Item $src $stageDir -Force -ErrorAction SilentlyContinue }
                     }
 
-                    # 2. Copy Worlds
                     $worldsDir = Join-Path $state.ServerPath "worlds"
                     if (Test-Path $worldsDir) {
                         Copy-Item -Path $worldsDir -Destination $stageDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -1021,13 +1193,11 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                         Write-Log "No 'worlds' directory found. Backing up configs only." -Level WARN
                     }
 
-                    # 3. Zip the staged directory
                     Write-Log "Compressing backup to $zipName... (This may take a moment)" -Level SYSTEM
                     [System.IO.Compression.ZipFile]::CreateFromDirectory($stageDir, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
                     $sizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
                     Write-Log "Backup complete ($sizeMB MB)." -Level SUCCESS
                     
-                    # 4. Purge old backups
                     $oldBackups = Get-ChildItem $backupRoot -Filter "full_backup_*.zip" | Sort-Object Name -Descending | Select-Object -Skip $state.MaxBackups
                     if ($oldBackups) {
                         Write-Log "Purging $($oldBackups.Count) old backup(s) to retain max $($state.MaxBackups)..." -Level SYSTEM
@@ -1036,7 +1206,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 } catch {
                     Write-Log "Backup failed: $($_.Exception.Message)" -Level ERROR
                 } finally {
-                    # Clean up staging directory
                     if (Test-Path $stageDir) { Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue }
                 }
             }
@@ -1044,7 +1213,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             function Restore-Backup {
                 param([string]$ZipPath)
                 
-                # Defense in depth: Never allow restore if server is running
                 if (Get-RunningServer) {
                     Write-Log "Cannot restore while server is running. Stop the server first." -Level ERROR
                     return
@@ -1056,7 +1224,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     Write-Log "Extracting backup files..." -Level SYSTEM
                     Expand-Archive -LiteralPath $ZipPath -DestinationPath $state.ServerPath -Force
                     
-                    # Verify Configs Restored
                     $n = 0
                     foreach ($f in $state.FilesToBackup) {
                         $d = Join-Path $state.ServerPath $f
@@ -1072,7 +1239,26 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 Write-Log "Contacting Minecraft API…" -Level SYSTEM
                 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                 $headers = @{ "User-Agent" = "Mozilla/5.0"; "Accept" = "application/json" }
-                $resp = Invoke-RestMethod -Uri $state.ApiUrl -Method Get -Headers $headers -TimeoutSec 15
+                
+                $maxRetries = 3
+                $retryCount = 0
+                $resp = $null
+                
+                while ($retryCount -lt $maxRetries) {
+                    try {
+                        $resp = Invoke-RestMethod -Uri $state.ApiUrl -Method Get -Headers $headers -TimeoutSec 15
+                        break
+                    } catch {
+                        $retryCount++
+                        if ($retryCount -lt $maxRetries) {
+                            Write-Log "API call failed (Attempt $retryCount/$maxRetries): $($_.Exception.Message). Retrying in 5 seconds..." -Level WARN
+                            Start-Sleep -Seconds 5
+                        } else {
+                            throw "Failed to contact Minecraft API after $maxRetries attempts: $($_.Exception.Message)"
+                        }
+                    }
+                }
+                
                 $link = $resp.result.links | Where-Object { $_.downloadType -eq "serverBedrockWindows" } | Select-Object -First 1
                 if (-not $link -or -not $link.downloadUrl) { throw "API did not return a valid download URL." }
                 return @{ Url = $link.downloadUrl; Filename = [System.IO.Path]::GetFileName($link.downloadUrl) }
@@ -1085,7 +1271,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             }
 
             function Get-ServerConnectionInfo {
-                # Get Port
                 $port = "19132"
                 $propsPath = Join-Path $state.ServerPath "server.properties"
                 if (Test-Path $propsPath) {
@@ -1093,23 +1278,51 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     if ($portLine -match "^server-port=(\d+)") { $port = $matches[1] }
                 }
 
-                # Get IP
                 $ip = "127.0.0.1"
                 try {
-                    $hostEntry = [System.Net.Dns]::GetHostEntry([System.Net.Dns]::GetHostName())
-                    $validIp = $hostEntry.AddressList | Where-Object { 
-                        $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and 
-                        $_.ToString() -notlike "169.254.*" 
+                    # Strict filtering of virtual adapters and invalid IPs
+                    $netConfig = Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object {
+                        $_.IPv4Address -ne $null -and
+                        $_.InterfaceAlias -notmatch "Loopback" -and
+                        $_.InterfaceAlias -notmatch "VMware" -and
+                        $_.InterfaceAlias -notmatch "VirtualBox" -and
+                        $_.InterfaceAlias -notmatch "vEthernet" -and
+                        $_.IPv4Address.IPAddress -notlike "169.*" -and
+                        $_.IPv4Address.IPAddress -ne "127.0.0.1"
                     } | Select-Object -First 1
-                    if ($validIp) { $ip = $validIp.ToString() }
+                    
+                    if ($netConfig) {
+                        $ip = $netConfig.IPv4Address.IPAddress
+                    }
                 } catch { }
 
-                return "$($ip):$($port)"
+                $hostname = [System.Net.Dns]::GetHostName()
+
+                return @{ Hostname = $hostname; IpPort = "$($ip):$($port)" }
             }
 
             function Start-ServerProcess {
                 $exe = Join-Path $state.ServerPath $state.ServerExecutable
-                if (-not (Test-Path $exe)) { return }
+                if (-not (Test-Path $exe)) { 
+                    Write-Log "Executable not found at $exe" -Level ERROR
+                    return 
+                }
+                
+                # 1. Check if a server is already running (started externally or by another manager)
+                $existingProc = Get-RunningServer
+                if ($existingProc) {
+                    $state.IsRunning = $true
+                    $state.ExpectedToRun = $true
+                    $state.ServerStartTime = $existingProc.StartTime
+                    Set-StatusLabel "lblServerStatus" "RUNNING (PID $($existingProc.Id))" "green"
+                    
+                    $connStr = Get-ServerConnectionInfo
+                    Set-StatusLabel "lblHostname" $connStr.Hostname "white"
+                    Set-StatusLabel "lblIpPort" $connStr.IpPort "blue"
+                    Write-Log "Server is already running (PID $($existingProc.Id)). Adopted process." -Level WARN
+                    return
+                }
+
                 Write-Log "Starting server (minimized)…" -Level SYSTEM
                 Set-StatusLabel "lblServerStatus" "STARTING…" "orange"
                 
@@ -1117,23 +1330,33 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 $startInfo.FileName = $exe
                 $startInfo.WorkingDirectory = $state.ServerPath
                 $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Minimized
-                [System.Diagnostics.Process]::Start($startInfo) | Out-Null
                 
-                Start-Sleep -Seconds 3
-                $proc = Get-RunningServer
-                if ($proc) {
+                try {
+                    $proc = [System.Diagnostics.Process]::Start($startInfo)
+                } catch {
+                    Write-Log "Failed to start server process: $($_.Exception.Message)" -Level ERROR
+                    Set-StatusLabel "lblServerStatus" "START FAILED" "red"
+                    return
+                }
+                
+                # Wait for it to spin up
+                Start-Sleep -Seconds 5 
+                
+                $runningProc = Get-RunningServer
+                if ($runningProc) {
                     $state.IsRunning = $true
                     $state.ExpectedToRun = $true
-                    Set-StatusLabel "lblServerStatus" "RUNNING (PID $($proc.Id))" "green"
+                    $state.ServerStartTime = $runningProc.StartTime
+                    Set-StatusLabel "lblServerStatus" "RUNNING (PID $($runningProc.Id))" "green"
                     
-                    # Fetch and display connection info
                     $connStr = Get-ServerConnectionInfo
-                    Set-StatusLabel "lblConnection" $connStr "blue"
-                    Write-Log "Server is listening on $connStr" -Level SUCCESS
+                    Set-StatusLabel "lblHostname" $connStr.Hostname "white"
+                    Set-StatusLabel "lblIpPort" $connStr.IpPort "blue"
+                    Write-Log "Server is listening on $($connStr.Hostname) ($($connStr.IpPort))" -Level SUCCESS
                 } else {
                     $state.IsRunning = $false
-                    Set-StatusLabel "lblServerStatus" "START UNCERTAIN" "orange"
-                    Write-Log "Server process not confirmed. Check manually." -Level WARN
+                    Set-StatusLabel "lblServerStatus" "START FAILED" "red"
+                    Write-Log "Server process exited immediately. Check server logs for configuration errors." -Level ERROR
                 }
             }
 
@@ -1256,15 +1479,16 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 if ($proc) {
                     $state.IsRunning = $true
                     $state.ExpectedToRun = $true
+                    $state.ServerStartTime = $proc.StartTime
                     Set-StatusLabel "lblServerStatus" "RUNNING (PID $($proc.Id))" "green"
                     
-                    # Update Connection info periodically if running
                     $connStr = Get-ServerConnectionInfo
-                    Set-StatusLabel "lblConnection" $connStr "blue"
+                    Set-StatusLabel "lblHostname" $connStr.Hostname "white"
+                    Set-StatusLabel "lblIpPort" $connStr.IpPort "blue"
                 } else {
                     $state.IsRunning = $false
                     Set-StatusLabel "lblServerStatus" "STOPPED" "red"
-                    Set-StatusLabel "lblConnection" "—" "gray"
+                    Set-StatusLabel "lblIpPort" "—" "gray"
                 }
 
                 try {
@@ -1302,7 +1526,9 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 Set-StatusLabel "lblLastChecked" (Get-Date -Format "yyyy-MM-dd HH:mm:ss") "gray"
                 Write-Log "── Periodic check done ──" -Level PERIODIC
             }
-        }).AddScript($Work).AddScript({ [System.GC]::Collect() })
+        }
+
+        $bgPS.AddScript($helperScript).AddScript($Work).AddScript({ [System.GC]::Collect() })
 
         $handle = $bgPS.BeginInvoke()
         $job = @{ PS = $bgPS; RS = $bgRS; Handle = $handle }
@@ -1442,7 +1668,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
         Start-BackgroundWork -Work {
             Set-Busy $true
             try {
-                if (Get-RunningServer) { return }
                 if (-not (Test-ServerInstalled)) { Write-Log "Executable not found." -Level ERROR; return }
                 Start-ServerProcess
             } catch {
@@ -1494,6 +1719,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 if ($proc) {
                     $state.IsRunning = $true
                     $state.ExpectedToRun = $true
+                    $state.ServerStartTime = $proc.StartTime
                     Set-StatusLabel "lblServerStatus" "RUNNING (PID $($proc.Id))" "green"
                 } else {
                     $state.IsRunning = $false
@@ -1536,7 +1762,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             return
         }
 
-        # Use WPF OpenFileDialog
         $dlg = New-Object Microsoft.Win32.OpenFileDialog
         $dlg.InitialDirectory = $backupRoot
         $dlg.Filter = "Zip Archives (*.zip)|*.zip"
@@ -1545,7 +1770,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
         if ($dlg.ShowDialog() -eq $true) {
             $selectedZip = $dlg.FileName
             
-            # Ask for confirmation before overwriting
             $confirm = [System.Windows.MessageBox]::Show("WARNING: This will OVERWRITE all existing configs and worlds with the files from:`n`n$selectedZip`n`nAre you sure?", "Confirm Restore", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
             
             if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
@@ -1566,7 +1790,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
         }
     })
 
-    # Intercept close if running background tasks
     $window.Add_Closing({
         param($s, $e)
         if ($sharedState.IsBusy) {
@@ -1617,34 +1840,40 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             if ($proc) {
                 $sharedState.IsRunning = $true
                 $sharedState.ExpectedToRun = $true
+                $sharedState.ServerStartTime = $proc.StartTime
                 $lblServerStatus.Text      = "RUNNING (PID $($proc.Id))"
                 $lblServerStatus.Foreground = $statusBrushCache["green"]
                 
-                # Set Connection Info immediately on load if running
                 $port = "19132"
                 $propsPath = Join-Path $sharedState.ServerPath "server.properties"
                 if (Test-Path $propsPath) {
                     $portLine = Get-Content $propsPath -ErrorAction SilentlyContinue | Where-Object { $_ -match "^server-port=" } | Select-Object -First 1
                     if ($portLine -match "^server-port=(\d+)") { $port = $matches[1] }
                 }
+                
                 $ip = "127.0.0.1"
                 try {
-                    $hostEntry = [System.Net.Dns]::GetHostEntry([System.Net.Dns]::GetHostName())
-                    $validIp = $hostEntry.AddressList | Where-Object { 
-                        $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and 
-                        $_.ToString() -notlike "169.254.*" 
+                    $netConfig = Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object {
+                        $_.IPv4Address -ne $null -and
+                        $_.InterfaceAlias -notmatch "Loopback" -and
+                        $_.InterfaceAlias -notmatch "VMware" -and
+                        $_.InterfaceAlias -notmatch "VirtualBox" -and
+                        $_.InterfaceAlias -notmatch "vEthernet" -and
+                        $_.IPv4Address.IPAddress -notlike "169.*" -and
+                        $_.IPv4Address.IPAddress -ne "127.0.0.1"
                     } | Select-Object -First 1
-                    if ($validIp) { $ip = $validIp.ToString() }
+                    if ($netConfig) { $ip = $netConfig.IPv4Address.IPAddress }
                 } catch { }
-                $lblConnection.Text = "$($ip):$($port)"
-                $lblConnection.Foreground = $statusBrushCache["blue"]
+                
+                $lblIpPort.Text = "$($ip):$($port)"
+                $lblIpPort.Foreground = $statusBrushCache["blue"]
 
             } else {
                 $sharedState.IsRunning = $false
                 $lblServerStatus.Text      = "STOPPED"
                 $lblServerStatus.Foreground = $statusBrushCache["red"]
-                $lblConnection.Text = "—"
-                $lblConnection.Foreground = $statusBrushCache["gray"]
+                $lblIpPort.Text = "—"
+                $lblIpPort.Foreground = $statusBrushCache["gray"]
             }
         } else {
             $sharedState.IsInstalled = $false
@@ -1655,13 +1884,13 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             $lblSetupStatus.Foreground = $statusBrushCache["red"]
             $lblServerStatus.Text  = "N/A"
             $lblServerStatus.Foreground = $statusBrushCache["orange"]
-            $lblConnection.Text = "—"
-            $lblConnection.Foreground = $statusBrushCache["gray"]
+            $lblIpPort.Text = "—"
+            $lblIpPort.Foreground = $statusBrushCache["gray"]
         }
 
         $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         Append-LogLine "$now [SYSTEM ] ═══════════════════════════════════════════" "SYSTEM"
-        Append-LogLine "$now [SYSTEM ]   Minecraft Bedrock Server Manager v23.0"    "SUCCESS"
+        Append-LogLine "$now [SYSTEM ]   Minecraft Bedrock Server Manager v27.0"    "SUCCESS"
         Append-LogLine "$now [SYSTEM ]   PowerShell $($PSVersionTable.PSVersion)"   "SYSTEM"
         Append-LogLine "$now [SYSTEM ] ═══════════════════════════════════════════" "SYSTEM"
 
