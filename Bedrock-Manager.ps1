@@ -13,7 +13,37 @@
     Optimized for long-term stability (weeks/months of uptime).
 
 .VERSION
-    28.3
+    28.4
+
+.CHANGES from 28.3
+    - Fixed: ContentRendered called Get-AppliedVersion/Set-AppliedVersion which
+      were only defined in the background helper runspace, causing silent
+      CommandNotFoundException errors on startup. Replaced with inline file ops.
+    - Fixed: Auto-launch race condition + UI freeze. ContentRendered no longer
+      Start-Sleeps on the GUI thread; periodic check and auto-launch are chained
+      in the same background work block.
+    - Fixed: Process adoption verified exe Path matches our installation,
+      preventing adoption of bedrock_server instances from other directories.
+    - Fixed: StandardInput writes now guarded by a shared lock
+      (StdInWriteLock) to prevent concurrent stream writes from tick handler,
+      Stop-GameServer, and window closing handler.
+    - Fixed: BedrockProcessReader C# type compilation guarded by TypeCompileLock
+      to prevent race across concurrent background runspaces.
+    - Fixed: Window closing now waits up to 10s for graceful 'stop', then
+      force-kills if needed. Prevents world corruption on close.
+    - Fixed: Background jobs cleaned up on window close (stop + dispose
+      runspaces).
+    - Fixed: Version comparison now uses proper semver numeric comparison
+      (Compare-BedrockVersion) instead of string equality.
+    - Fixed: try/catch around Process.StartTime access (can throw
+      Win32Exception for elevated processes).
+    - Fixed: Firewall rule verified for adopted processes.
+    - Fixed: ArrayLists in sharedState now use [ArrayList]::Synchronized().
+    - Fixed: Backup zip overwrite safety (delete existing before create).
+    - Fixed: Crash detection checks process by PID when available, not just name.
+    - Fixed: DispatcherTimer guarded against tick after window closed.
+    - Added: Path validation on root path change.
+    - Added: PendingProgress read as single atomic snapshot in tick handler.
 #>
 
 param(
@@ -195,21 +225,25 @@ $script:sharedState = [hashtable]::Synchronized(@{
     UpdateAvailable     = $false
     ExpectedToRun       = $false
     ServerStartTime     = $null
-    PendingMessages     = [System.Collections.ArrayList]::new()
-    PendingStatus       = [System.Collections.ArrayList]::new()
-    PendingProgress     = @{ Type = "none"; Value = 0 }
-    PendingButtons      = [System.Collections.ArrayList]::new()
+    PendingMessages     = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+    PendingStatus       = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+    PendingButtons      = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
     StopRequested       = $false
     GuiReady            = $false
     WindowClosed        = $false
     ServerProcess       = $null
-    ServerConsoleMessages = [System.Collections.ArrayList]::new()
-    PendingServerCommands = [System.Collections.ArrayList]::new()
-    ServerConsoleHistory  = [System.Collections.ArrayList]::new()
+    ServerConsoleMessages = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+    PendingServerCommands = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+    ServerConsoleHistory  = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
     MaxServerConsoleLines = 2000
     ServerOutputReader  = $null
+    ServerProcessId     = $null
     FirewallRuleVerified = $false
     RestoreZipPath      = $null
+    StdInWriteLock      = [Object]::new()
+    TypeCompileLock     = [Object]::new()
+    ProgressLock        = [Object]::new()
+    PendingProgress     = @{ Type = "none"; Value = 0 }
 })
 
 $script:sharedState.ServerPath     = Join-Path $script:sharedState.RootPath "Server"
@@ -222,7 +256,7 @@ $xamlString = @"
 <Window
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="Minecraft Bedrock Server Manager v28.3"
+    Title="Minecraft Bedrock Server Manager v28.4"
     Width="1280" Height="780"
     MinWidth="1000" MinHeight="600"
     WindowStartupLocation="CenterScreen"
@@ -342,7 +376,7 @@ $xamlString = @"
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0">
                 <TextBlock Text="Minecraft Bedrock Server Manager" FontSize="18" FontWeight="Bold" Foreground="{StaticResource TextPrimary}"/>
-                <TextBlock Text="v28.3 — Dual Console Edition" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,2,0,0"/>
+                <TextBlock Text="v28.4 — Dual Console Edition" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,2,0,0"/>
             </StackPanel>
             <Border Grid.Column="1" Background="{StaticResource BgCard}" BorderBrush="{StaticResource BorderDefault}" BorderThickness="1" CornerRadius="4" Padding="8,5" VerticalAlignment="Center">
                 <StackPanel Orientation="Horizontal">
@@ -528,7 +562,7 @@ $xamlString = @"
                     <Button x:Name="btnBackupNow" Content="💾 Backup Now" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" IsEnabled="False"/>
                     <Button x:Name="btnRestoreBackup" Content="⏪ Restore Backup" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" IsEnabled="False"/>
                 </WrapPanel>
-                <TextBlock Grid.Column="1" x:Name="lblFooter" Text="v28.3" Foreground="{StaticResource TextMuted}" FontSize="10" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                <TextBlock Grid.Column="1" x:Name="lblFooter" Text="v28.4" Foreground="{StaticResource TextMuted}" FontSize="10" VerticalAlignment="Center" Margin="10,0,0,0"/>
             </Grid>
         </Border>
 
@@ -758,9 +792,9 @@ $guiPowerShell.AddScript({
 
     $lblHostname.Text = [System.Net.Dns]::GetHostName()
 
-    $lblInstallDir.Add_MouseLeftButtonUp({ $p = $sharedState.ServerPath; if (Test-Path $p) { Start-Process explorer.exe $p } })
-    $lblBackupDir.Add_MouseLeftButtonUp({ $p = $sharedState.BackupPath; if (Test-Path $p) { Start-Process explorer.exe $p } else { [System.Windows.MessageBox]::Show("Backup folder does not exist yet.", "Not Found", "OK", "Information") | Out-Null } })
-    $lblLogFile.Add_MouseLeftButtonUp({ $p = Join-Path $sharedState.LogsPath "BedrockServerManager_$(Get-Date -Format 'yyyyMMdd').log"; if (Test-Path $p) { Start-Process notepad.exe $p } else { [System.Windows.MessageBox]::Show("Log file does not exist yet.", "Not Found", "OK", "Information") | Out-Null } })
+    $lblInstallDir.Add_MouseLeftButtonUp({ $p = $sharedState.ServerPath; if (Test-Path $p) { Start-Process explorer.exe -ArgumentList """$p""" } })
+    $lblBackupDir.Add_MouseLeftButtonUp({ $p = $sharedState.BackupPath; if (Test-Path $p) { Start-Process explorer.exe -ArgumentList """$p""" } else { [System.Windows.MessageBox]::Show("Backup folder does not exist yet.", "Not Found", "OK", "Information") | Out-Null } })
+    $lblLogFile.Add_MouseLeftButtonUp({ $p = Join-Path $sharedState.LogsPath "BedrockServerManager_$(Get-Date -Format 'yyyyMMdd').log"; if (Test-Path $p) { Start-Process notepad.exe -ArgumentList """$p""" } else { [System.Windows.MessageBox]::Show("Log file does not exist yet.", "Not Found", "OK", "Information") | Out-Null } })
 
     function Update-PathLabels {
         $lblInstallDir.Text = $sharedState.ServerPath
@@ -842,7 +876,7 @@ $guiPowerShell.AddScript({
         $btnSendCommand.IsEnabled   = $canSendCmd
     }
 
-    $script:activeJobs = [System.Collections.ArrayList]::new()
+    $script:activeJobs = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
     $script:nextUpdateCheck = [datetime]::Now.AddHours($sharedState.UpdateCheckHours)
     $script:lastGcTime = [datetime]::Now
     $script:pcBootTime = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
@@ -852,6 +886,9 @@ $guiPowerShell.AddScript({
     $timer = New-Object System.Windows.Threading.DispatcherTimer
     $timer.Interval = [TimeSpan]::FromMilliseconds(300)
     $timer.Add_Tick({
+
+        # Guard: don't process if window is closed
+        if ($sharedState.WindowClosed) { return }
 
         # 1. Process Pending Manager Messages
         $msgCount = [Math]::Min(50, $sharedState.PendingMessages.Count)
@@ -914,9 +951,10 @@ $guiPowerShell.AddScript({
         }
 
         # 1c. Process Native Server Output Queues
-        if ($sharedState.ServerOutputReader) {
+        $currentReader = $sharedState.ServerOutputReader
+        if ($currentReader) {
             $hasOutput = $false
-            $queue = $sharedState.ServerOutputReader.OutputQueue
+            $queue = $currentReader.OutputQueue
             $readCount = 0
             while ($readCount -lt 100) {
                 $line = ""
@@ -937,7 +975,7 @@ $guiPowerShell.AddScript({
                 $hasOutput = $true
             }
             
-            $errQueue = $sharedState.ServerOutputReader.ErrorQueue
+            $errQueue = $currentReader.ErrorQueue
             while ($true) {
                 $line = ""
                 if (-not $errQueue.TryDequeue([ref]$line)) { break }
@@ -967,10 +1005,14 @@ $guiPowerShell.AddScript({
             try { $cmds = $sharedState.PendingServerCommands.ToArray(); $sharedState.PendingServerCommands.Clear() }
             finally { [System.Threading.Monitor]::Exit($sharedState.PendingServerCommands.SyncRoot) }
             foreach ($c in $cmds) {
-                if ($sharedState.ServerProcess -and -not $sharedState.ServerProcess.HasExited) {
+                $sp = $sharedState.ServerProcess
+                if ($sp -and -not $sp.HasExited) {
                     try {
-                        $sharedState.ServerProcess.StandardInput.WriteLine($c)
-                        $sharedState.ServerProcess.StandardInput.Flush()
+                        [System.Threading.Monitor]::Enter($sharedState.StdInWriteLock)
+                        try {
+                            $sp.StandardInput.WriteLine($c)
+                            $sp.StandardInput.Flush()
+                        } finally { [System.Threading.Monitor]::Exit($sharedState.StdInWriteLock) }
                         [System.Threading.Monitor]::Enter($sharedState.ServerConsoleMessages.SyncRoot)
                         try { $sharedState.ServerConsoleMessages.Add(@{ Text = "> $c"; Level = "CMD" }) | Out-Null }
                         finally { [System.Threading.Monitor]::Exit($sharedState.ServerConsoleMessages.SyncRoot) }
@@ -980,7 +1022,10 @@ $guiPowerShell.AddScript({
                             $sharedState.ExpectedToRun = $false
                         }
                     } catch {
-                        Append-LogLine "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [ERROR  ] Failed to send command '$c': $($_.Exception.Message)" "ERROR"
+                        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                        [System.Threading.Monitor]::Enter($sharedState.PendingMessages.SyncRoot)
+                        try { $sharedState.PendingMessages.Add(@{ Text = "$ts [ERROR  ] Failed to send command '$c': $($_.Exception.Message)"; Level = "ERROR" }) | Out-Null }
+                        finally { [System.Threading.Monitor]::Exit($sharedState.PendingMessages.SyncRoot) }
                     }
                 }
             }
@@ -1007,8 +1052,10 @@ $guiPowerShell.AddScript({
             }
         }
 
-        # 3. Progress Bar
-        $prog = $sharedState.PendingProgress
+        # 3. Progress Bar — read as single atomic snapshot
+        [System.Threading.Monitor]::Enter($sharedState.ProgressLock)
+        try { $prog = @{ Type = $sharedState.PendingProgress.Type; Value = $sharedState.PendingProgress.Value } }
+        finally { [System.Threading.Monitor]::Exit($sharedState.ProgressLock) }
         switch ($prog.Type) {
             "indeterminate" { $progressBar.IsIndeterminate = $true; $lblProgressText.Visibility = [System.Windows.Visibility]::Collapsed }
             "value" {
@@ -1021,7 +1068,9 @@ $guiPowerShell.AddScript({
                 $progressBar.IsIndeterminate = $false
                 $progressBar.Value = 0
                 $lblProgressText.Visibility = [System.Windows.Visibility]::Collapsed
-                $sharedState.PendingProgress = @{ Type = "none"; Value = 0 }
+                [System.Threading.Monitor]::Enter($sharedState.ProgressLock)
+                try { $sharedState.PendingProgress = @{ Type = "none"; Value = 0 } }
+                finally { [System.Threading.Monitor]::Exit($sharedState.ProgressLock) }
             }
         }
 
@@ -1038,8 +1087,9 @@ $guiPowerShell.AddScript({
         }
         
         # 4b. Check if server process exited and handle cleanup/crash detection
-        if ($sharedState.ServerProcess -and $sharedState.ServerProcess.HasExited -and -not $sharedState.IsBusy) {
-            $code = $sharedState.ServerProcess.ExitCode
+        $sp = $sharedState.ServerProcess
+        if ($sp -and $sp.HasExited -and -not $sharedState.IsBusy) {
+            $code = $sp.ExitCode
             $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
             
             [System.Threading.Monitor]::Enter($sharedState.ServerConsoleMessages.SyncRoot)
@@ -1053,6 +1103,7 @@ $guiPowerShell.AddScript({
             if (-not $sharedState.ExpectedToRun) {
                 # Graceful exit via 'stop' command or Stop-GameServer
                 $sharedState.ServerProcess = $null
+                $sharedState.ServerProcessId = $null
                 $sharedState.ServerOutputReader = $null
                 $sharedState.IsRunning = $false
                 $sharedState.ServerStartTime = $null
@@ -1065,6 +1116,7 @@ $guiPowerShell.AddScript({
                 # If ExpectedToRun is true, Crash protection will catch it in the next block.
                 # Just clear ServerProcess so we don't loop this message.
                 $sharedState.ServerProcess = $null
+                $sharedState.ServerProcessId = $null
                 $sharedState.ServerOutputReader = $null
             }
         }
@@ -1091,16 +1143,33 @@ $guiPowerShell.AddScript({
             } else { $lblLastBackup.Text = "None" }
         }
 
-        # 6. Crash Protection
+        # 6. Crash Protection — check by PID if available, fall back to name
         if (-not $sharedState.IsBusy -and $sharedState.ExpectedToRun -and $sharedState.CrashProtection) {
             $exeName = [System.IO.Path]::GetFileNameWithoutExtension($sharedState.ServerExecutable)
             $exePath = Join-Path $sharedState.ServerPath $sharedState.ServerExecutable
             if (Test-Path $exePath) {
-                $proc = Get-Process -Name $exeName -ErrorAction SilentlyContinue | Select-Object -First 1
-                if (-not $proc -and $sharedState.IsRunning) {
+                $procFound = $false
+                if ($sharedState.ServerProcessId) {
+                    try {
+                        $byId = Get-Process -Id $sharedState.ServerProcessId -ErrorAction SilentlyContinue
+                        if ($byId -and -not $byId.HasExited) { $procFound = $true }
+                    } catch { }
+                }
+                if (-not $procFound) {
+                    # Fallback: check by name + path match
+                    $byName = Get-Process -Name $exeName -ErrorAction SilentlyContinue | Where-Object {
+                        try { $_.Path -eq $exePath } catch { $false }
+                    } | Select-Object -First 1
+                    if ($byName -and -not $byName.HasExited) {
+                        $procFound = $true
+                        $sharedState.ServerProcessId = $byName.Id
+                    }
+                }
+                if (-not $procFound -and $sharedState.IsRunning) {
                     $sharedState.IsRunning = $false
                     $sharedState.ServerStartTime = $null
                     $sharedState.ServerProcess = $null
+                    $sharedState.ServerProcessId = $null
                     $sharedState.ServerOutputReader = $null
                     $errBrush = $brushCache["ERROR"]
                     $redBrush = $statusBrushCache["red"]
@@ -1145,9 +1214,9 @@ $guiPowerShell.AddScript({
             foreach ($job in $script:activeJobs) {
                 if ($job.Handle.IsCompleted) {
                     try { $job.PS.EndInvoke($job.Handle) } catch { }
-                    $job.PS.Dispose()
-                    $job.RS.Close()
-                    $job.RS.Dispose()
+                    try { $job.PS.Dispose() } catch { }
+                    try { $job.RS.Close() } catch { }
+                    try { $job.RS.Dispose() } catch { }
                     $completed += $job
                 }
             }
@@ -1171,12 +1240,19 @@ $guiPowerShell.AddScript({
 
     # Path / Settings handlers
     $txtRootPath.Add_TextChanged({
-        $sharedState.RootPath = $txtRootPath.Text
-        $sharedState.ServerPath     = Join-Path $sharedState.RootPath "Server"
-        $sharedState.BackupPath     = Join-Path $sharedState.RootPath "Backups"
-        $sharedState.LogsPath       = Join-Path $sharedState.RootPath "Logs"
-        $sharedState.UpdateTempPath = Join-Path $sharedState.RootPath "UpdateTemp"
-        Update-PathLabels
+        $newPath = $txtRootPath.Text
+        # Validate path characters
+        $invalid = [System.IO.Path]::GetInvalidPathChars()
+        $hasInvalid = $false
+        foreach ($c in $invalid) { if ($newPath.Contains($c)) { $hasInvalid = $true; break } }
+        if (-not $hasInvalid -and $newPath.Trim() -ne "") {
+            $sharedState.RootPath = $newPath
+            $sharedState.ServerPath     = Join-Path $sharedState.RootPath "Server"
+            $sharedState.BackupPath     = Join-Path $sharedState.RootPath "Backups"
+            $sharedState.LogsPath       = Join-Path $sharedState.RootPath "Logs"
+            $sharedState.UpdateTempPath = Join-Path $sharedState.RootPath "UpdateTemp"
+            Update-PathLabels
+        }
     })
 
     $btnApplySettings.Add_Click({
@@ -1191,7 +1267,10 @@ $guiPowerShell.AddScript({
             $sharedState.CrashProtection     = $chkCrashProtect.IsChecked
             $sharedState.AutoCheckUpdates    = $chkAutoCheckUpdates.IsChecked
             $sharedState.AutoApplyUpdates    = $chkAutoApplyUpdates.IsChecked
-            Append-LogLine "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [SYSTEM ] Settings applied successfully." "SUCCESS"
+            $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            [System.Threading.Monitor]::Enter($sharedState.PendingMessages.SyncRoot)
+            try { $sharedState.PendingMessages.Add(@{ Text = "$ts [SYSTEM ] Settings applied successfully."; Level = "SUCCESS" }) | Out-Null }
+            finally { [System.Threading.Monitor]::Exit($sharedState.PendingMessages.SyncRoot) }
             Update-ButtonStates
             Save-Config
         } else {
@@ -1218,7 +1297,7 @@ $guiPowerShell.AddScript({
 
     $btnOpenFolder.Add_Click({
         $p = $sharedState.RootPath
-        if (Test-Path $p) { Start-Process explorer.exe $p }
+        if (Test-Path $p) { Start-Process explorer.exe -ArgumentList """$p""" }
         else { [System.Windows.MessageBox]::Show("Folder does not exist yet.", "Folder Not Found", "OK", "Information") | Out-Null }
     })
 
@@ -1230,7 +1309,7 @@ $guiPowerShell.AddScript({
         $cmd = $txtServerCommand.Text
         if ([string]::IsNullOrWhiteSpace($cmd)) { return }
         if (-not $sharedState.IsRunning -or -not $sharedState.ServerProcess) {
-            [System.Windows.MessageBox]::Show("Server is not running.", "Cannot send command", "OK", "Warning") | Out-Null
+            [System.Windows.MessageBox]::Show("Server is not running or was adopted (no stdin available). Stop and restart from GUI to enable command input.", "Cannot send command", "OK", "Warning") | Out-Null
             return
         }
         [System.Threading.Monitor]::Enter($sharedState.PendingServerCommands.SyncRoot)
@@ -1305,28 +1384,34 @@ $guiPowerShell.AddScript({
         $helperScript = {
 
             # ── Compile C# class for process output queue (avoids PS event stalling) ──
+            # Guarded by TypeCompileLock to prevent race across concurrent background runspaces
             if (-not ("BedrockProcessReader" -as [type])) {
-                Add-Type -TypeDefinition @"
-                using System;
-                using System.Diagnostics;
-                using System.Collections.Concurrent;
+                [System.Threading.Monitor]::Enter($state.TypeCompileLock)
+                try {
+                    if (-not ("BedrockProcessReader" -as [type])) {
+                        Add-Type -TypeDefinition @"
+                        using System;
+                        using System.Diagnostics;
+                        using System.Collections.Concurrent;
 
-                public class BedrockProcessReader
-                {
-                    public ConcurrentQueue<string> OutputQueue = new ConcurrentQueue<string>();
-                    public ConcurrentQueue<string> ErrorQueue = new ConcurrentQueue<string>();
-                    
-                    public void Attach(Process p)
-                    {
-                        p.OutputDataReceived += (s, e) => {
-                            if (e.Data != null) OutputQueue.Enqueue(e.Data);
-                        };
-                        p.ErrorDataReceived += (s, e) => {
-                            if (e.Data != null) ErrorQueue.Enqueue(e.Data);
-                        };
-                    }
-                }
+                        public class BedrockProcessReader
+                        {
+                            public ConcurrentQueue<string> OutputQueue = new ConcurrentQueue<string>();
+                            public ConcurrentQueue<string> ErrorQueue = new ConcurrentQueue<string>();
+                            
+                            public void Attach(Process p)
+                            {
+                                p.OutputDataReceived += (s, e) => {
+                                    if (e.Data != null) OutputQueue.Enqueue(e.Data);
+                                };
+                                p.ErrorDataReceived += (s, e) => {
+                                    if (e.Data != null) ErrorQueue.Enqueue(e.Data);
+                                };
+                            }
+                        }
 "@
+                    }
+                } finally { [System.Threading.Monitor]::Exit($state.TypeCompileLock) }
             }
 
             function Write-Log {
@@ -1372,7 +1457,29 @@ $guiPowerShell.AddScript({
 
             function Set-Progress {
                 param([string]$Type, [int]$Value = 0)
-                $state.PendingProgress = @{ Type = $Type; Value = $Value }
+                [System.Threading.Monitor]::Enter($state.ProgressLock)
+                try { $state.PendingProgress = @{ Type = $Type; Value = $Value } }
+                finally { [System.Threading.Monitor]::Exit($state.ProgressLock) }
+            }
+
+            # ── Semver-style version comparison for Bedrock version strings ──
+            # Returns: 1 if v1 > v2, -1 if v1 < v2, 0 if equal
+            function Compare-BedrockVersion {
+                param([string]$v1, [string]$v2)
+                if ([string]::IsNullOrWhiteSpace($v1) -and [string]::IsNullOrWhiteSpace($v2)) { return 0 }
+                if ([string]::IsNullOrWhiteSpace($v1)) { return -1 }
+                if ([string]::IsNullOrWhiteSpace($v2)) { return 1 }
+                $parts1 = $v1.Split('.')
+                $parts2 = $v2.Split('.')
+                $maxLen = [Math]::Max($parts1.Count, $parts2.Count)
+                for ($i = 0; $i -lt $maxLen; $i++) {
+                    $p1 = 0; $p2 = 0
+                    if ($i -lt $parts1.Count) { [int]::TryParse($parts1[$i], [ref]$p1) | Out-Null }
+                    if ($i -lt $parts2.Count) { [int]::TryParse($parts2[$i], [ref]$p2) | Out-Null }
+                    if ($p1 -gt $p2) { return 1 }
+                    if ($p1 -lt $p2) { return -1 }
+                }
+                return 0
             }
 
             function Ensure-FirewallRule {
@@ -1392,10 +1499,22 @@ $guiPowerShell.AddScript({
                 $exeName = [System.IO.Path]::GetFileNameWithoutExtension($state.ServerExecutable)
                 $exePath = Join-Path $state.ServerPath $state.ServerExecutable
                 if ($state.ServerProcess -and -not $state.ServerProcess.HasExited) { return $state.ServerProcess }
+                # Try by PID first (more reliable)
+                if ($state.ServerProcessId) {
+                    try {
+                        $byId = Get-Process -Id $state.ServerProcessId -ErrorAction SilentlyContinue
+                        if ($byId -and -not $byId.HasExited) { return $byId }
+                    } catch { }
+                }
+                # Fallback: by name + path match
                 $procs = Get-Process -Name $exeName -ErrorAction SilentlyContinue
                 if (-not $procs) { return $null }
                 $procList = @($procs)
-                if ($procList.Count -eq 1) { return $procList[0] }
+                if ($procList.Count -eq 1) {
+                    # Verify path if accessible
+                    try { if ($procList[0].Path -and ($procList[0].Path -ne $exePath)) { return $null } } catch { }
+                    return $procList[0]
+                }
                 foreach ($p in $procList) {
                     try { if ($p.Path -and ($p.Path -eq $exePath)) { return $p } } catch { }
                 }
@@ -1436,17 +1555,22 @@ $guiPowerShell.AddScript({
                     $state.ExpectedToRun = $false
                     $state.ServerStartTime = $null
                     $state.ServerProcess = $null
+                    $state.ServerProcessId = $null
                     return
                 }
                 Write-Log "Stopping server (PID $($proc.Id))..." -Level WARN
                 Set-StatusLabel "lblServerStatus" "STOPPING…" "orange"
 
-                if ($state.ServerProcess -and -not $state.ServerProcess.HasExited) {
+                $sp = $state.ServerProcess
+                if ($sp -and -not $sp.HasExited) {
                     try {
-                        $state.ServerProcess.StandardInput.WriteLine("stop")
-                        $state.ServerProcess.StandardInput.Flush()
-                        Write-ServerConsole "> stop" "CMD"
-                        Write-Log "Sent 'stop' command via stdin (graceful shutdown)." -Level SYSTEM
+                        [System.Threading.Monitor]::Enter($state.StdInWriteLock)
+                        try {
+                            $sp.StandardInput.WriteLine("stop")
+                            $sp.StandardInput.Flush()
+                            Write-ServerConsole "> stop" "CMD"
+                            Write-Log "Sent 'stop' command via stdin (graceful shutdown)." -Level SYSTEM
+                        } finally { [System.Threading.Monitor]::Exit($state.StdInWriteLock) }
                     } catch {
                         Write-Log "Could not send stdin 'stop': $($_.Exception.Message)" -Level WARN
                     }
@@ -1458,7 +1582,7 @@ $guiPowerShell.AddScript({
                 }
                 if (Get-RunningServer) {
                     Write-Log "Server did not exit in $($state.ServerStopTimeout)s. Force-killing..." -Level WARN
-                    Get-RunningServer | Stop-Process -Force
+                    try { Get-RunningServer | Stop-Process -Force -ErrorAction Stop } catch { Write-Log "Force-kill error: $($_.Exception.Message)" -Level WARN }
                     Start-Sleep -Seconds 2
                 }
 
@@ -1466,6 +1590,7 @@ $guiPowerShell.AddScript({
                     try { $state.ServerProcess.Dispose() } catch { }
                     $state.ServerProcess = $null
                 }
+                $state.ServerProcessId = $null
                 if ($state.ServerOutputReader) {
                     $state.ServerOutputReader = $null
                 }
@@ -1498,6 +1623,8 @@ $guiPowerShell.AddScript({
                     if (Test-Path $worldsDir) { Copy-Item -Path $worldsDir -Destination $stageDir -Recurse -Force -ErrorAction SilentlyContinue }
                     else { Write-Log "No 'worlds' directory found. Backing up configs only." -Level WARN }
                     Write-Log "Compressing backup to $zipName... (This may take a moment)" -Level SYSTEM
+                    # Delete existing zip if it somehow exists (collision safety)
+                    if (Test-Path $zipPath) { Remove-Item $zipPath -Force -ErrorAction SilentlyContinue }
                     [System.IO.Compression.ZipFile]::CreateFromDirectory($stageDir, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
                     $sizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
                     Write-Log "Backup complete ($sizeMB MB)." -Level SUCCESS
@@ -1516,7 +1643,19 @@ $guiPowerShell.AddScript({
                 Write-Log "Preparing to restore from $ZipPath..." -Level WARN
                 try {
                     Write-Log "Extracting backup files..." -Level SYSTEM
-                    Expand-Archive -LiteralPath $ZipPath -DestinationPath $state.ServerPath -Force
+                    # Use .NET ZipFile for better handling of read-only files
+                    Add-Type -AssemblyName System.IO.Compression.FileSystem
+                    $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+                    try {
+                        foreach ($entry in $zip.Entries) {
+                            $destPath = Join-Path $state.ServerPath $entry.FullName
+                            $destDir = Split-Path $destPath -Parent
+                            if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+                            # Skip directory entries
+                            if ($entry.FullName.EndsWith("/") -or $entry.FullName.EndsWith("\")) { continue }
+                            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $destPath, $true)
+                        }
+                    } finally { $zip.Dispose() }
                     $n = 0
                     foreach ($f in $state.FilesToBackup) { $d = Join-Path $state.ServerPath $f; if (Test-Path $d) { $n++ } }
                     Write-Log "Restore complete. $n config file(s) verified." -Level SUCCESS
@@ -1577,13 +1716,20 @@ $guiPowerShell.AddScript({
                 $exe = Join-Path $state.ServerPath $state.ServerExecutable
                 if (-not (Test-Path $exe)) { Write-Log "Executable not found at $exe" -Level ERROR; return }
 
-                # 1. Adopt already-running process if present (we will NOT have stdin control)
-                $existingProc = Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($state.ServerExecutable)) -ErrorAction SilentlyContinue | Select-Object -First 1
+                # 1. Adopt already-running process if present — verify Path matches our installation
+                $exeName = [System.IO.Path]::GetFileNameWithoutExtension($state.ServerExecutable)
+                $existingProc = Get-Process -Name $exeName -ErrorAction SilentlyContinue | Where-Object {
+                    try { $_.Path -eq $exe } catch { $false }
+                } | Select-Object -First 1
+
                 if ($existingProc -and (-not $state.ServerProcess -or $state.ServerProcess.HasExited)) {
+                    # Ensure firewall rule exists for the exe even if we're adopting
+                    Ensure-FirewallRule -ExePath $exe
                     $state.IsRunning = $true
                     $state.ExpectedToRun = $true
                     $state.ServerProcess = $null
-                    $state.ServerStartTime = $existingProc.StartTime
+                    $state.ServerProcessId = $existingProc.Id
+                    try { $state.ServerStartTime = $existingProc.StartTime } catch { $state.ServerStartTime = [datetime]::Now }
                     Set-StatusLabel "lblServerStatus" "RUNNING (PID $($existingProc.Id) — adopted, no stdin)" "green"
                     $connStr = Get-ServerConnectionInfo
                     Set-StatusLabel "lblHostname" $connStr.Hostname "white"
@@ -1630,11 +1776,13 @@ $guiPowerShell.AddScript({
                 } catch {
                     Write-Log "Failed to start server process: $($_.Exception.Message)" -Level ERROR
                     Set-StatusLabel "lblServerStatus" "START FAILED" "red"
+                    $state.ServerOutputReader = $null
                     return
                 }
                 if (-not $started) {
                     Write-Log "Failed to start server process (Start() returned false)." -Level ERROR
                     Set-StatusLabel "lblServerStatus" "START FAILED" "red"
+                    $state.ServerOutputReader = $null
                     return
                 }
 
@@ -1642,6 +1790,7 @@ $guiPowerShell.AddScript({
                 $proc.BeginErrorReadLine()
 
                 $state.ServerProcess = $proc
+                $state.ServerProcessId = $proc.Id
 
                 # 5. Wait for it to spin up
                 Write-Log "Waiting for server to initialize (up to 45 seconds)..." -Level SYSTEM
@@ -1660,7 +1809,7 @@ $guiPowerShell.AddScript({
                 if ($runningProc) {
                     $state.IsRunning = $true
                     $state.ExpectedToRun = $true
-                    $state.ServerStartTime = $runningProc.StartTime
+                    try { $state.ServerStartTime = $runningProc.StartTime } catch { $state.ServerStartTime = [datetime]::Now }
                     Set-StatusLabel "lblServerStatus" "RUNNING (PID $($runningProc.Id))" "green"
                     $connStr = Get-ServerConnectionInfo
                     Set-StatusLabel "lblHostname" $connStr.Hostname "white"
@@ -1672,6 +1821,7 @@ $guiPowerShell.AddScript({
                     $state.ExpectedToRun = $false
                     try { if ($proc) { $proc.Dispose() } } catch { }
                     $state.ServerProcess = $null
+                    $state.ServerProcessId = $null
                     $state.ServerOutputReader = $null
                     Set-StatusLabel "lblServerStatus" "START FAILED" "red"
                     Write-Log "Server process exited or did not respond in time. Check server console panel for errors." -Level ERROR
@@ -1751,7 +1901,7 @@ $guiPowerShell.AddScript({
                 if ($proc) {
                     $state.IsRunning = $true
                     $state.ExpectedToRun = $true
-                    $state.ServerStartTime = $proc.StartTime
+                    try { $state.ServerStartTime = $proc.StartTime } catch { $state.ServerStartTime = [datetime]::Now }
                     Set-StatusLabel "lblServerStatus" "RUNNING (PID $($proc.Id))" "green"
                     $connStr = Get-ServerConnectionInfo
                     Set-StatusLabel "lblHostname" $connStr.Hostname "white"
@@ -1774,13 +1924,15 @@ $guiPowerShell.AddScript({
                         Set-AppliedVersion -Version $verLatest
                         $currentVer = $verLatest
                     }
-                    if ($currentVer -eq $verLatest) {
+                    # Use semver comparison instead of string equality
+                    $cmp = Compare-BedrockVersion $currentVer $verLatest
+                    if ($cmp -eq 0) {
                         $state.UpdateAvailable = $false
                         Set-StatusLabel "lblUpdateStatus" "UP TO DATE" "green"
                     } else {
                         $state.UpdateAvailable = $true
                         Set-StatusLabel "lblUpdateStatus" "UPDATE AVAILABLE" "orange"
-                        Write-Log "New version available: $verLatest" -Level WARN
+                        Write-Log "New version available: $verLatest (current: $currentVer)" -Level WARN
                         if ($state.AutoApplyUpdates) {
                             Write-Log "Auto-apply enabled. Starting update process..." -Level SYSTEM
                             Download-AndInstall -Url $latest.Url -Filename $latest.Filename -IsFirstSetup $false
@@ -1845,13 +1997,15 @@ $guiPowerShell.AddScript({
                 Set-StatusLabel "lblLatest" $ver "blue"
                 $appliedVer = Get-AppliedVersion
                 if (-not $appliedVer) { Write-Log "Installed version unknown. Syncing tracking file to latest ($ver) to prevent false update loops." -Level WARN; Set-AppliedVersion -Version $ver; $appliedVer = $ver }
-                if ($appliedVer -eq $ver) {
+                # Use semver comparison
+                $cmp = Compare-BedrockVersion $appliedVer $ver
+                if ($cmp -eq 0) {
                     $state.UpdateAvailable = $false
                     Write-Log "Already up to date." -Level SUCCESS
                     Set-StatusLabel "lblUpdateStatus" "UP TO DATE" "green"
                 } else {
                     $state.UpdateAvailable = $true
-                    Write-Log "Update available: $ver" -Level WARN
+                    Write-Log "Update available: $ver (current: $appliedVer)" -Level WARN
                     Set-StatusLabel "lblUpdateStatus" "UPDATE AVAILABLE" "orange"
                 }
                 $proc = Get-RunningServer
@@ -1931,7 +2085,7 @@ $guiPowerShell.AddScript({
                 $proc = Get-RunningServer
                 if ($proc) {
                     $state.IsRunning = $true; $state.ExpectedToRun = $true
-                    $state.ServerStartTime = $proc.StartTime
+                    try { $state.ServerStartTime = $proc.StartTime } catch { $state.ServerStartTime = [datetime]::Now }
                     Set-StatusLabel "lblServerStatus" "RUNNING (PID $($proc.Id))" "green"
                 } else {
                     $state.IsRunning = $false
@@ -1982,12 +2136,27 @@ $guiPowerShell.AddScript({
             $msg = [System.Windows.MessageBox]::Show("A background task is currently running. Closing the manager may interrupt it and corrupt files. Are you sure you want to exit?", "Confirm Exit", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
             if ($msg -ne [System.Windows.MessageBoxResult]::Yes) { $e.Cancel = $true; return }
         }
-        # Try a graceful stdin 'stop' before window closes
-        if ($sharedState.ServerProcess -and -not $sharedState.ServerProcess.HasExited) {
+        # Try a graceful stdin 'stop' before window closes — only for our wrapper process
+        $sp = $sharedState.ServerProcess
+        if ($sp -and -not $sp.HasExited) {
             try {
-                $sharedState.ServerProcess.StandardInput.WriteLine("stop")
-                $sharedState.ServerProcess.StandardInput.Flush()
+                [System.Threading.Monitor]::Enter($sharedState.StdInWriteLock)
+                try {
+                    $sp.StandardInput.WriteLine("stop")
+                    $sp.StandardInput.Flush()
+                } finally { [System.Threading.Monitor]::Exit($sharedState.StdInWriteLock) }
             } catch { }
+            # Wait up to 10 seconds for graceful shutdown
+            $waited = 0
+            while (-not $sp.HasExited -and $waited -lt 50) {
+                Start-Sleep -Milliseconds 200
+                $waited++
+            }
+            # Force kill if still alive
+            if (-not $sp.HasExited) {
+                try { $sp.Kill() } catch { }
+                Start-Sleep -Seconds 1
+            }
         }
     })
 
@@ -1995,6 +2164,23 @@ $guiPowerShell.AddScript({
         $timer.Stop()
         $sharedState.WindowClosed = $true
         Save-Config
+
+        # Cleanup background jobs — stop and dispose all runspaces
+        if ($script:activeJobs.Count -gt 0) {
+            $jobsCopy = @()
+            [System.Threading.Monitor]::Enter($script:activeJobs.SyncRoot)
+            try { $jobsCopy = $script:activeJobs.ToArray(); $script:activeJobs.Clear() }
+            finally { [System.Threading.Monitor]::Exit($script:activeJobs.SyncRoot) }
+            foreach ($job in $jobsCopy) {
+                try {
+                    if (-not $job.Handle.IsCompleted) { $job.PS.Stop() }
+                    $job.PS.EndInvoke($job.Handle)
+                } catch { }
+                try { $job.PS.Dispose() } catch { }
+                try { $job.RS.Close() } catch { }
+                try { $job.RS.Dispose() } catch { }
+            }
+        }
     })
 
     $window.Add_ContentRendered({
@@ -2006,26 +2192,47 @@ $guiPowerShell.AddScript({
             $sharedState.IsInstalled = $true
             $v = (Get-Item $exe).VersionInfo.ProductVersion
             if (-not $v) { $v = (Get-Item $exe).VersionInfo.FileVersion }
+            # Inline version file operations (fix: Get-AppliedVersion/Set-AppliedVersion were
+            # only defined in the background helper runspace, not accessible from GUI runspace)
+            $appliedVerPath = Join-Path $sharedState.ServerPath "applied_version.txt"
+            $appliedVer = $null
+            if (Test-Path $appliedVerPath) { $appliedVer = (Get-Content $appliedVerPath -ErrorAction SilentlyContinue).Trim() }
             if (-not $v -or $v.Trim() -eq "") {
-                $appliedVer = Get-AppliedVersion
                 if ($appliedVer) { $v = $appliedVer } else { $v = "Unknown" }
             } else {
                 $v = $v.Trim()
-                if (-not (Get-AppliedVersion)) { Set-AppliedVersion -Version $v }
+                if (-not $appliedVer) { Set-Content -Path $appliedVerPath -Value $v -Force -ErrorAction SilentlyContinue }
             }
             $lblInstalled.Text = $v
             $lblInstalled.Foreground = $statusBrushCache["white"]
             $lblSetupStatus.Text = "INSTALLED"
             $lblSetupStatus.Foreground = $statusBrushCache["green"]
 
+            # Check for already-running server — verify Path matches our installation
             $exeName = [System.IO.Path]::GetFileNameWithoutExtension($sharedState.ServerExecutable)
-            $proc    = Get-Process -Name $exeName -ErrorAction SilentlyContinue | Select-Object -First 1
+            $proc = Get-Process -Name $exeName -ErrorAction SilentlyContinue | Where-Object {
+                try { $_.Path -eq $exe } catch { $false }
+            } | Select-Object -First 1
+
             if ($proc) {
+                # Verify/create firewall rule for adopted process
+                try {
+                    $ruleName = "Minecraft Bedrock Server"
+                    $existingRule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+                    if (-not $existingRule) {
+                        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Program $exe -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+                    }
+                    $sharedState.FirewallRuleVerified = $true
+                } catch { }
+
                 $sharedState.IsRunning = $true
                 $sharedState.ExpectedToRun = $true
-                $sharedState.ServerStartTime = $proc.StartTime
+                try { $sharedState.ServerStartTime = $proc.StartTime } catch { $sharedState.ServerStartTime = $null }
+                $sharedState.ServerProcessId = $proc.Id
                 $lblServerStatus.Text = "RUNNING (PID $($proc.Id) — adopted)"
                 $lblServerStatus.Foreground = $statusBrushCache["green"]
+
+                # Get port from server.properties
                 $port = "19132"
                 $propsPath = Join-Path $sharedState.ServerPath "server.properties"
                 if (Test-Path $propsPath) {
@@ -2070,7 +2277,7 @@ $guiPowerShell.AddScript({
 
         $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         Append-LogLine "$now [SYSTEM ] ═══════════════════════════════════════════" "SYSTEM"
-        Append-LogLine "$now [SYSTEM ]   Minecraft Bedrock Server Manager v28.3"    "SUCCESS"
+        Append-LogLine "$now [SYSTEM ]   Minecraft Bedrock Server Manager v28.4"    "SUCCESS"
         Append-LogLine "$now [SYSTEM ]   PowerShell $($PSVersionTable.PSVersion)"   "SYSTEM"
         Append-LogLine "$now [SYSTEM ] ═══════════════════════════════════════════" "SYSTEM"
 
@@ -2078,19 +2285,18 @@ $guiPowerShell.AddScript({
             Append-LogLine "$now [WARN   ] No installation detected — click 'Setup / Install' to begin." "WARN"
         } else {
             Append-LogLine "$now [INFO   ] Installation found. Performing initial update check..." "INFO"
+            # Chain periodic check and auto-launch in the same background work block.
+            # This eliminates the race condition where IsBusy was set asynchronously
+            # and the auto-launch check ran before IsBusy was visible, plus the
+            # Start-Sleep that froze the GUI thread for 2 seconds.
             Start-BackgroundWork -Work {
                 Set-Busy $true
-                try { Periodic-StatusCheck } finally { Set-Busy $false }
-            }
-            if ($sharedState.AutoLaunchOnStart -and -not $sharedState.IsRunning) {
-                Start-Sleep -Seconds 2
-                if (-not $sharedState.IsRunning -and -not $sharedState.IsBusy) {
-                    Append-LogLine "$now [SYSTEM ] Auto-launch enabled. Starting server..." "SYSTEM"
-                    Start-BackgroundWork -Work {
-                        Set-Busy $true
-                        try { Start-ServerProcess } finally { Set-Busy $false }
+                try {
+                    Periodic-StatusCheck
+                    if ($state.AutoLaunchOnStart -and -not $state.IsRunning) {
+                        Start-ServerProcess
                     }
-                }
+                } finally { Set-Busy $false }
             }
         }
         Update-ButtonStates
