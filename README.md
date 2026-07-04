@@ -4,7 +4,7 @@
 
 The **Minecraft Bedrock Server Manager** is a standalone, lightweight PowerShell script that deploys a native WPF/XAML graphical user interface (GUI) to manage a Minecraft Bedrock Dedicated Server on Windows. It requires zero third-party dependencies or installations—just standard Windows PowerShell 5.1. 
 
-<img width="60%" alt="image" src="https://github.com/user-attachments/assets/2f071c9e-ad28-4010-84b5-7ea85fce6310" />
+<img width="60%" alt="image" src="https://github.com/user-attachments/assets/29dd2833-da30-45f3-a8cf-3aa177d79c2b" />
 
 ## What It Does
 
