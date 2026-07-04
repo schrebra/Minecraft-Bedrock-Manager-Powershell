@@ -1,4 +1,0 @@
-- [ ] Create automatic backup upon detecting new update. Automatically shut down server, backup, apply update, start server.
-- [ ] Hash individually backed up files and upon restore verify restore matches backup.
-- [ ] Add copy button next to IP address - will copy to clipboard.
-- [ ] Update status and Version panels can be merged into one panel.
