@@ -6,15 +6,14 @@
 .DESCRIPTION
     WPF/XAML GUI for first-time setup, auto-update, and management of
     Minecraft Bedrock Dedicated Server on Windows.
+    Now features a DUAL CONSOLE layout:
+      - PowerShell / Manager console (left): manager-side logs
+      - Server console (right): wrapped bedrock_server.exe stdin/stdout via .NET
+        Process redirection — supports sending custom commands from the GUI.
     Optimized for long-term stability (weeks/months of uptime).
-    Clean folder structure:
-    C:\Bedrock\Server       (Minecraft Server Files)
-    C:\Bedrock\Backups      (Combined .zip Archives of Worlds & Configs)
-    C:\Bedrock\Logs         (Daily Manager Logs)
-    C:\Bedrock\UpdateTemp   (Temporary download/extraction files)
 
 .VERSION
-    27.4
+    28.0
 #>
 
 param(
@@ -31,7 +30,6 @@ function Test-IsAdmin {
 }
 
 function Test-VcRedistInstalled {
-    # Registry check is the most reliable way to avoid 32/64-bit file path redirection issues
     $regPaths = @(
         "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64",
         "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
@@ -56,7 +54,6 @@ function Get-DhcpAdapterInfo {
             $_.IPv4Address.IPAddress -notlike "169.*" -and
             $_.IPv4Address.IPAddress -ne "127.0.0.1"
         }
-        
         foreach ($net in $netAdapters) {
             $alias = $net.InterfaceAlias
             $ipAddr = $net.IPv4Address.IPAddress
@@ -65,21 +62,13 @@ function Get-DhcpAdapterInfo {
                 $prefix = (Get-NetIPAddress -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue).PrefixLength
                 $gateway = (Get-NetRoute -InterfaceAlias $alias -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Select-Object -First 1).NextHop
                 $dns = (Get-DnsClientServerAddress -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
-                
-                return @{ 
-                    Alias = $alias
-                    Ip = $ipAddr
-                    Prefix = $prefix
-                    Gateway = $gateway
-                    Dns = $dns
-                }
+                return @{ Alias = $alias; Ip = $ipAddr; Prefix = $prefix; Gateway = $gateway; Dns = $dns }
             }
         }
     } catch { }
     return $null
 }
 
-# 1. If launched with -ApplyStaticIp (meaning it was just elevated), apply it immediately.
 if ($ApplyStaticIp -and (Test-IsAdmin)) {
     $dhcpInfo = Get-DhcpAdapterInfo
     if ($dhcpInfo) {
@@ -99,33 +88,21 @@ if ($ApplyStaticIp -and (Test-IsAdmin)) {
         }
     }
 } else {
-    # 2. Check if we need to prompt for elevation for EITHER VCRedist OR Static IP
     $needsElevation = $false
     $reasons = @()
-
-    if (-not (Test-VcRedistInstalled)) {
-        $reasons += "Install missing Visual C++ Redistributable"
-        $needsElevation = $true
-    }
-
+    if (-not (Test-VcRedistInstalled)) { $reasons += "Install missing Visual C++ Redistributable"; $needsElevation = $true }
     $dhcpInfo = Get-DhcpAdapterInfo
-    if ($dhcpInfo) {
-        $reasons += "Set static IP for adapter '$($dhcpInfo.Alias)'"
-        $needsElevation = $true
-    }
+    if ($dhcpInfo) { $reasons += "Set static IP for adapter '$($dhcpInfo.Alias)'"; $needsElevation = $true }
 
     if ($needsElevation) {
         if (-not (Test-IsAdmin)) {
-            # We aren't Admin. Prompt to restart as Admin to fix these.
             $msg = "The Bedrock Server Manager recommends the following actions that require Administrator privileges:`n`n"
             foreach ($r in $reasons) { $msg += " • $r`n" }
             $msg += "`nWould you like to restart the manager as Administrator now?`n`n(Any currently running Minecraft server will be safely stopped first.)"
-            
             $result = [System.Windows.Forms.MessageBox]::Show($msg, "Administrator Privileges Needed", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
             if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
                 Stop-Process -Name "bedrock_server" -Force -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 2
-                
                 $scriptPath = $PSCommandPath
                 try {
                     Start-Process powershell -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -File `"$scriptPath`" -RootPath `"$RootPath`" -ApplyStaticIp"
@@ -135,19 +112,15 @@ if ($ApplyStaticIp -and (Test-IsAdmin)) {
                 }
             }
         } else {
-            # We ARE Admin. If VCRedist is missing, install it silently.
             if (-not (Test-VcRedistInstalled)) {
                 try {
                     $url = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
                     $tempFile = Join-Path $env:TEMP "vc_redist.x64.exe"
-                    
                     Write-Host "Downloading Visual C++ Redistributable..."
                     $ProgressPreference = 'SilentlyContinue'
                     Invoke-WebRequest -Uri $url -OutFile $tempFile -UseBasicParsing
-                    
                     Write-Host "Installing Visual C++ Redistributable..."
                     $proc = Start-Process -FilePath $tempFile -ArgumentList "/install", "/passive", "/norestart" -Wait -PassThru
-                    
                     if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) {
                         [System.Windows.Forms.MessageBox]::Show("Visual C++ Redistributable installed successfully!", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
                     } else {
@@ -158,12 +131,9 @@ if ($ApplyStaticIp -and (Test-IsAdmin)) {
                     [System.Windows.Forms.MessageBox]::Show("Failed to download or install the dependency: $($_.Exception.Message)", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
                 }
             }
-            
-            # If DHCP is enabled, prompt to apply Static IP now.
             if ($dhcpInfo) {
                 $msg = "Your active network adapter '$($dhcpInfo.Alias)' (IP: $($dhcpInfo.Ip)) is using DHCP (dynamic IP).`n`nFor a stable Minecraft server, a static IP is highly recommended so players don't have to update their IP address when your PC restarts.`n`nWould you like to apply a static IP now using your current settings?"
                 $result = [System.Windows.Forms.MessageBox]::Show($msg, "Static IP Recommendation", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-                
                 if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
                     try {
                         Set-NetIPInterface -InterfaceAlias $dhcpInfo.Alias -Dhcp Disabled -ErrorAction Stop
@@ -193,7 +163,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # ─── Shared State ─────────────────────────────────────────────────────────────
- $script:sharedState = [hashtable]::Synchronized(@{
+$script:sharedState = [hashtable]::Synchronized(@{
     RootPath            = if ($RootPath -ne "") { $RootPath } else { "C:\Bedrock" }
     ApiUrl              = "https://net-secondary.web.minecraft-services.net/api/v1.0/download/links"
     ServerExecutable    = "bedrock_server.exe"
@@ -206,7 +176,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     UpdateCheckHours    = 24
     MaxBackups          = 3
     LogRetentionDays    = 30
-    ServerStopTimeout   = 10
+    ServerStopTimeout   = 15
     DownloadTimeout     = 180
     LatestUrl           = $null
     LatestFilename      = $null
@@ -225,22 +195,27 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     StopRequested       = $false
     GuiReady            = $false
     WindowClosed        = $false
+    # NEW: Server console (stdin/stdout wrapper) state
+    ServerProcess       = $null
+    ServerConsoleMessages = [System.Collections.ArrayList]::new()
+    PendingServerCommands = [System.Collections.ArrayList]::new()
+    ServerConsoleHistory  = [System.Collections.ArrayList]::new()
+    MaxServerConsoleLines = 2000
 })
 
-# Derived Paths
- $script:sharedState.ServerPath     = Join-Path $script:sharedState.RootPath "Server"
- $script:sharedState.BackupPath     = Join-Path $script:sharedState.RootPath "Backups"
- $script:sharedState.LogsPath       = Join-Path $script:sharedState.RootPath "Logs"
- $script:sharedState.UpdateTempPath = Join-Path $script:sharedState.RootPath "UpdateTemp"
+$script:sharedState.ServerPath     = Join-Path $script:sharedState.RootPath "Server"
+$script:sharedState.BackupPath     = Join-Path $script:sharedState.RootPath "Backups"
+$script:sharedState.LogsPath       = Join-Path $script:sharedState.RootPath "Logs"
+$script:sharedState.UpdateTempPath = Join-Path $script:sharedState.RootPath "UpdateTemp"
 
 # ─── XAML ─────────────────────────────────────────────────────────────────────
- $xamlString = @"
+$xamlString = @"
 <Window
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="Minecraft Bedrock Server Manager v27.4"
-    Width="1024" Height="680"
-    MinWidth="800" MinHeight="500"
+    Title="Minecraft Bedrock Server Manager v28.0"
+    Width="1280" Height="780"
+    MinWidth="1000" MinHeight="600"
     WindowStartupLocation="CenterScreen"
     WindowState="Maximized"
     Background="#F0F2F5">
@@ -251,7 +226,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
         <SolidColorBrush x:Key="AccentRed"      Color="#C62828"/>
         <SolidColorBrush x:Key="AccentOrange"   Color="#E65100"/>
         <SolidColorBrush x:Key="AccentGray"     Color="#546E7A"/>
-        
+
         <SolidColorBrush x:Key="BgCard"         Color="#FFFFFF"/>
         <SolidColorBrush x:Key="BgInput"        Color="#FAFAFA"/>
         <SolidColorBrush x:Key="BorderDefault"  Color="#E0E0E0"/>
@@ -350,7 +325,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <!-- ═══ 0 · HEADER ═════════════════════════════════════════════════ -->
+        <!-- 0 HEADER -->
         <Grid Grid.Row="0" Margin="2,0,2,10">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
@@ -358,9 +333,9 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0">
                 <TextBlock Text="Minecraft Bedrock Server Manager" FontSize="18" FontWeight="Bold" Foreground="{StaticResource TextPrimary}"/>
-                <TextBlock Text="v27.4 Production Ready" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,2,0,0"/>
+                <TextBlock Text="v28.0 — Dual Console Edition" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,2,0,0"/>
             </StackPanel>
-            <Border Grid.Column="1" Background="{StaticResource BgCard}" BorderBrush="{StaticResource BorderDefault}" BorderThickness="1" CornerRadius="4" Padding="8,5" VerticalAlignment="Center" ToolTip="Shows the time remaining until the next automatic check for server updates.">
+            <Border Grid.Column="1" Background="{StaticResource BgCard}" BorderBrush="{StaticResource BorderDefault}" BorderThickness="1" CornerRadius="4" Padding="8,5" VerticalAlignment="Center">
                 <StackPanel Orientation="Horizontal">
                     <Ellipse x:Name="dotPeriodic" Width="8" Height="8" Fill="{StaticResource AccentGray}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                     <TextBlock x:Name="lblNextCheck" Text="Auto-check: —" Foreground="{StaticResource TextSecondary}" FontSize="10.5" VerticalAlignment="Center"/>
@@ -368,7 +343,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             </Border>
         </Grid>
 
-        <!-- ═══ 1 · ROOT PATH BAR ══════════════════════════════════════════ -->
+        <!-- 1 ROOT PATH BAR -->
         <Border Grid.Row="1" Style="{StaticResource Card}">
             <Grid>
                 <Grid.ColumnDefinitions>
@@ -384,7 +359,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             </Grid>
         </Border>
 
-        <!-- ═══ 2 · STAT CARDS (Redesigned for Alignment) ══════════════════ -->
+        <!-- 2 STAT CARDS -->
         <Grid Grid.Row="2" Margin="3,3">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
@@ -392,9 +367,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 <ColumnDefinition Width="1.2*"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
-            
-            <!-- Card 1: Versions (Grid used for perfect alignment) -->
-            <Border Grid.Column="0" Style="{StaticResource Card}" ToolTip="The installed and latest available versions of the Minecraft server.">
+            <Border Grid.Column="0" Style="{StaticResource Card}">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -405,19 +378,14 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    
                     <TextBlock Grid.Row="0" Grid.ColumnSpan="2" Text="VERSIONS" Style="{StaticResource StatLabel}"/>
-                    
                     <TextBlock Grid.Row="1" Grid.Column="0" Text="Installed: " FontSize="11" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,3,0,0"/>
                     <TextBlock Grid.Row="1" Grid.Column="1" x:Name="lblInstalled" Text="—" Style="{StaticResource StatValue}" Margin="0,3,0,0"/>
-                    
                     <TextBlock Grid.Row="2" Grid.Column="0" Text="Latest: " FontSize="11" Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center" Margin="0,4,0,0"/>
                     <TextBlock Grid.Row="2" Grid.Column="1" x:Name="lblLatest" Text="—" Style="{StaticResource StatValue}" Foreground="{StaticResource AccentBlue}" Margin="0,4,0,0"/>
                 </Grid>
             </Border>
-
-            <!-- Card 2: System Status -->
-            <Border Grid.Column="1" Style="{StaticResource Card}" ToolTip="Current status of the server process and installation.">
+            <Border Grid.Column="1" Style="{StaticResource Card}">
                 <StackPanel>
                     <TextBlock Text="SYSTEM STATUS" Style="{StaticResource StatLabel}"/>
                     <StackPanel Orientation="Horizontal" Margin="0,3,0,0">
@@ -430,18 +398,14 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     </StackPanel>
                 </StackPanel>
             </Border>
-
-            <!-- Card 3: Connection -->
-            <Border Grid.Column="2" Style="{StaticResource Card}" ToolTip="The Hostname and IP address the server is listening on.">
+            <Border Grid.Column="2" Style="{StaticResource Card}">
                 <StackPanel>
                     <TextBlock Text="CONNECTION" Style="{StaticResource StatLabel}"/>
                     <TextBlock x:Name="lblHostname" Text="—" Style="{StaticResource StatValue}" Margin="0,3,0,0"/>
                     <TextBlock x:Name="lblIpPort" Text="—" Style="{StaticResource StatValue}" Foreground="{StaticResource AccentBlue}" Margin="0,4,0,0"/>
                 </StackPanel>
             </Border>
-
-            <!-- Card 4: Update Status -->
-            <Border Grid.Column="3" Style="{StaticResource Card}" ToolTip="Shows if your installed version is up to date or if a new update is available.">
+            <Border Grid.Column="3" Style="{StaticResource Card}">
                 <StackPanel>
                     <TextBlock Text="UPDATE STATUS" Style="{StaticResource StatLabel}"/>
                     <TextBlock x:Name="lblUpdateStatus" Text="—" Style="{StaticResource StatValue}" Foreground="{StaticResource AccentGray}" Margin="0,3,0,0"/>
@@ -449,7 +413,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             </Border>
         </Grid>
 
-        <!-- ═══ 3 · INFO / PATHS / SYSTEM CARD ═════════════════════════════ -->
+        <!-- 3 INFO / PATHS / SYSTEM CARD -->
         <Border Grid.Row="3" Style="{StaticResource Card}">
             <Grid>
                 <Grid.ColumnDefinitions>
@@ -462,15 +426,13 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
-
-                <!-- Row 0 -->
                 <Grid Grid.Row="0" Grid.Column="0" Margin="0,0,0,4">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="100"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="Server Dir:" Style="{StaticResource InfoKey}"/>
-                    <TextBlock Grid.Column="1" x:Name="lblInstallDir" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand" ToolTip="Click to open the Server directory."/>
+                    <TextBlock Grid.Column="1" x:Name="lblInstallDir" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand"/>
                 </Grid>
                 <Rectangle Grid.Row="0" Grid.Column="1" Fill="{StaticResource BorderDefault}" Width="1" HorizontalAlignment="Center"/>
                 <Grid Grid.Row="0" Grid.Column="2" Margin="0,0,0,4">
@@ -481,15 +443,13 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     <TextBlock Grid.Column="0" Text="PC Uptime:" Style="{StaticResource InfoKey}"/>
                     <TextBlock Grid.Column="1" x:Name="lblPcUptime" Text="—" Style="{StaticResource InfoVal}"/>
                 </Grid>
-
-                <!-- Row 1 -->
                 <Grid Grid.Row="1" Grid.Column="0" Margin="0,0,0,4">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="100"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="Backups Dir:" Style="{StaticResource InfoKey}"/>
-                    <TextBlock Grid.Column="1" x:Name="lblBackupDir" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand" ToolTip="Click to open the Backups directory."/>
+                    <TextBlock Grid.Column="1" x:Name="lblBackupDir" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand"/>
                 </Grid>
                 <Rectangle Grid.Row="1" Grid.Column="1" Fill="{StaticResource BorderDefault}" Width="1" HorizontalAlignment="Center"/>
                 <Grid Grid.Row="1" Grid.Column="2" Margin="0,0,0,4">
@@ -500,15 +460,13 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     <TextBlock Grid.Column="0" Text="Server Up:" Style="{StaticResource InfoKey}"/>
                     <TextBlock Grid.Column="1" x:Name="lblServerUptime" Text="—" Style="{StaticResource InfoVal}"/>
                 </Grid>
-
-                <!-- Row 2 -->
                 <Grid Grid.Row="2" Grid.Column="0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="100"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="Logs Dir:" Style="{StaticResource InfoKey}"/>
-                    <TextBlock Grid.Column="1" x:Name="lblLogFile" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand" ToolTip="Click to open today's manager log file."/>
+                    <TextBlock Grid.Column="1" x:Name="lblLogFile" Text="—" Style="{StaticResource InfoVal}" Foreground="{StaticResource AccentBlue}" TextDecorations="Underline" Cursor="Hand"/>
                 </Grid>
                 <Rectangle Grid.Row="2" Grid.Column="1" Fill="{StaticResource BorderDefault}" Width="1" HorizontalAlignment="Center"/>
                 <Grid Grid.Row="2" Grid.Column="2">
@@ -517,12 +475,12 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="Last Backup:" Style="{StaticResource InfoKey}"/>
-                    <TextBlock Grid.Column="1" x:Name="lblLastBackup" Text="—" Style="{StaticResource InfoVal}" ToolTip="The time the last zip backup was created."/>
+                    <TextBlock Grid.Column="1" x:Name="lblLastBackup" Text="—" Style="{StaticResource InfoVal}"/>
                 </Grid>
             </Grid>
         </Border>
 
-        <!-- ═══ 4 · SETTINGS BAR ════════════════════════════════════════════ -->
+        <!-- 4 SETTINGS BAR -->
         <Border Grid.Row="4" Style="{StaticResource Card}">
             <Grid>
                 <Grid.ColumnDefinitions>
@@ -530,21 +488,21 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <WrapPanel Grid.Column="0" VerticalAlignment="Center">
-                    <CheckBox x:Name="chkAutoStart" Content="Auto-start after update" Style="{StaticResource SettingsCheckBox}" IsChecked="True" ToolTip="If checked, the server will automatically launch immediately after an update is applied."/>
-                    <CheckBox x:Name="chkAutoLaunch" Content="Auto-launch on GUI start" Style="{StaticResource SettingsCheckBox}" IsChecked="False" ToolTip="If checked, the server will start automatically whenever you open this GUI program."/>
-                    <CheckBox x:Name="chkCrashProtect" Content="Crash Protection" Style="{StaticResource SettingsCheckBox}" IsChecked="True" ToolTip="If checked, the manager will automatically restart the server if it crashes."/>
-                    <CheckBox x:Name="chkAutoCheckUpdates" Content="Check every:" Style="{StaticResource SettingsCheckBox}" IsChecked="True" ToolTip="If checked, the manager will automatically check Minecraft.net for new server versions."/>
-                    <TextBox x:Name="txtInterval" Width="35" Text="24" VerticalAlignment="Center" Style="{StaticResource LightTextBox}" Padding="3,4" ToolTip="How often to check for updates (in hours)."/>
+                    <CheckBox x:Name="chkAutoStart" Content="Auto-start after update" Style="{StaticResource SettingsCheckBox}" IsChecked="True"/>
+                    <CheckBox x:Name="chkAutoLaunch" Content="Auto-launch on GUI start" Style="{StaticResource SettingsCheckBox}" IsChecked="False"/>
+                    <CheckBox x:Name="chkCrashProtect" Content="Crash Protection" Style="{StaticResource SettingsCheckBox}" IsChecked="True"/>
+                    <CheckBox x:Name="chkAutoCheckUpdates" Content="Check every:" Style="{StaticResource SettingsCheckBox}" IsChecked="True"/>
+                    <TextBox x:Name="txtInterval" Width="35" Text="24" VerticalAlignment="Center" Style="{StaticResource LightTextBox}" Padding="3,4"/>
                     <TextBlock Text="hrs" VerticalAlignment="Center" Margin="4,0,15,0" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
-                    <CheckBox x:Name="chkAutoApplyUpdates" Content="Auto-apply" Style="{StaticResource SettingsCheckBox}" IsChecked="False" ToolTip="If checked, the manager will automatically download and install updates without asking."/>
-                    <TextBlock Text="Keep Backups:" VerticalAlignment="Center" Margin="15,0,4,0" Foreground="{StaticResource TextSecondary}" FontSize="11" ToolTip="The maximum number of zip archives to keep."/>
-                    <TextBox x:Name="txtMaxBackups" Width="35" Text="3" VerticalAlignment="Center" Style="{StaticResource LightTextBox}" Padding="3,4" ToolTip="Maximum number of zip backup files to retain."/>
+                    <CheckBox x:Name="chkAutoApplyUpdates" Content="Auto-apply" Style="{StaticResource SettingsCheckBox}" IsChecked="False"/>
+                    <TextBlock Text="Keep Backups:" VerticalAlignment="Center" Margin="15,0,4,0" Foreground="{StaticResource TextSecondary}" FontSize="11"/>
+                    <TextBox x:Name="txtMaxBackups" Width="35" Text="3" VerticalAlignment="Center" Style="{StaticResource LightTextBox}" Padding="3,4"/>
                 </WrapPanel>
                 <Button Grid.Column="1" x:Name="btnApplySettings" Content="Apply Settings" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}"/>
             </Grid>
         </Border>
 
-        <!-- ═══ 5 · BUTTON BAR ══════════════════════════════════════════════ -->
+        <!-- 5 BUTTON BAR -->
         <Border Grid.Row="5" Style="{StaticResource Card}" Margin="3,3,3,0">
             <Grid>
                 <Grid.ColumnDefinitions>
@@ -552,72 +510,124 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <WrapPanel Grid.Column="0" VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <Button x:Name="btnFirstSetup" Content="⬇ Setup / Install" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}" ToolTip="Download and install the Minecraft Bedrock Server for the first time."/>
-                    <Button x:Name="btnCheckUpdate" Content="🔍 Check Updates" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}" ToolTip="Manually ask Mojang's servers if a newer version is available."/>
-                    <Button x:Name="btnUpdate" Content="⬆ Download and Update" Background="{StaticResource AccentGreen}" Style="{StaticResource ActionButton}" IsEnabled="False" ToolTip="Download the latest server files, safely back up configs and worlds, and update."/>
-                    <Button x:Name="btnStartServer" Content="▶ Start Server" Background="{StaticResource AccentGreen}" Style="{StaticResource ActionButton}" ToolTip="Start the bedrock_server.exe process. It will launch minimized."/>
-                    <Button x:Name="btnStopServer" Content="■ Stop Server" Background="{StaticResource AccentRed}" Style="{StaticResource ActionButton}" ToolTip="Send a stop command to the running server process."/>
-                    <Button x:Name="btnRefresh" Content="↻ Refresh Status" Background="{StaticResource AccentOrange}" Style="{StaticResource ActionButton}" ToolTip="Scan the system to update installed version, running status, and directories."/>
-                    <Button x:Name="btnBackupNow" Content="💾 Backup Now" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" IsEnabled="False" ToolTip="Manually create a zipped backup of worlds and configs. Disabled while server is running."/>
-                    <Button x:Name="btnRestoreBackup" Content="⏪ Restore Backup" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" IsEnabled="False" ToolTip="Select a backup .zip to restore. Disabled while server is running."/>
+                    <Button x:Name="btnFirstSetup" Content="⬇ Setup / Install" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}"/>
+                    <Button x:Name="btnCheckUpdate" Content="🔍 Check Updates" Background="{StaticResource AccentBlue}" Style="{StaticResource ActionButton}"/>
+                    <Button x:Name="btnUpdate" Content="⬆ Download and Update" Background="{StaticResource AccentGreen}" Style="{StaticResource ActionButton}" IsEnabled="False"/>
+                    <Button x:Name="btnStartServer" Content="▶ Start Server" Background="{StaticResource AccentGreen}" Style="{StaticResource ActionButton}"/>
+                    <Button x:Name="btnStopServer" Content="■ Stop Server" Background="{StaticResource AccentRed}" Style="{StaticResource ActionButton}"/>
+                    <Button x:Name="btnRefresh" Content="↻ Refresh Status" Background="{StaticResource AccentOrange}" Style="{StaticResource ActionButton}"/>
+                    <Button x:Name="btnBackupNow" Content="💾 Backup Now" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" IsEnabled="False"/>
+                    <Button x:Name="btnRestoreBackup" Content="⏪ Restore Backup" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" IsEnabled="False"/>
                 </WrapPanel>
-                <TextBlock Grid.Column="1" x:Name="lblFooter" Text="v27.4" Foreground="{StaticResource TextMuted}" FontSize="10" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                <TextBlock Grid.Column="1" x:Name="lblFooter" Text="v28.0" Foreground="{StaticResource TextMuted}" FontSize="10" VerticalAlignment="Center" Margin="10,0,0,0"/>
             </Grid>
         </Border>
 
-        <!-- ═══ 6 · PROGRESS ════════════════════════════════════════════════ -->
+        <!-- 6 PROGRESS -->
         <Grid Grid.Row="6" Margin="3,2,3,2">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
-            <ProgressBar x:Name="progressBar" Grid.Row="0" Height="4" Minimum="0" Maximum="100" Value="0" Background="#E0E0E0" Foreground="{StaticResource AccentGreen}" BorderThickness="0" ToolTip="Shows the progress of downloads, extractions, and backups."/>
+            <ProgressBar x:Name="progressBar" Grid.Row="0" Height="4" Minimum="0" Maximum="100" Value="0" Background="#E0E0E0" Foreground="{StaticResource AccentGreen}" BorderThickness="0"/>
             <TextBlock x:Name="lblProgressText" Grid.Row="1" Text="" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="4,2,0,0" Visibility="Collapsed"/>
         </Grid>
 
-        <!-- ═══ 7 · CONSOLE LOG ══════════════════════════════════════════════ -->
-        <Border Grid.Row="7" Margin="3,3,3,3" BorderBrush="{StaticResource BorderDefault}" BorderThickness="1" CornerRadius="5">
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
-                <Border Grid.Row="0" Background="{StaticResource BgCard}" CornerRadius="5,5,0,0" Padding="10,6" BorderBrush="{StaticResource BorderDefault}" BorderThickness="0,0,0,1">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Text="Console Output" Foreground="{StaticResource TextPrimary}" FontSize="11" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
-                        <Button Grid.Column="1" x:Name="btnClearLog" Content="Clear" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" Padding="10,4"/>
-                    </Grid>
-                </Border>
-                <RichTextBox x:Name="rtbLog" Grid.Row="1" Background="#012456" Foreground="#EEEEEE" BorderThickness="0" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" FontFamily="Consolas,Courier New" FontSize="11" Padding="8,6">
-                    <RichTextBox.Resources>
-                        <Style TargetType="Paragraph">
-                            <Setter Property="Margin" Value="0,1,0,1"/>
-                            <Setter Property="LineHeight" Value="14"/>
-                        </Style>
-                    </RichTextBox.Resources>
-                </RichTextBox>
-            </Grid>
-        </Border>
+        <!-- 7 DUAL CONSOLES -->
+        <Grid Grid.Row="7" Margin="3,3,3,3">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="5"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- LEFT: PowerShell / Manager Console -->
+            <Border Grid.Column="0" BorderBrush="{StaticResource BorderDefault}" BorderThickness="1" CornerRadius="5">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <Border Grid.Row="0" Background="{StaticResource BgCard}" CornerRadius="5,5,0,0" Padding="10,6" BorderBrush="{StaticResource BorderDefault}" BorderThickness="0,0,0,1">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="PowerShell Console (Manager)" Foreground="{StaticResource TextPrimary}" FontSize="11" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                            <Button Grid.Column="1" x:Name="btnClearLog" Content="Clear" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" Padding="10,4"/>
+                        </Grid>
+                    </Border>
+                    <RichTextBox x:Name="rtbLog" Grid.Row="1" Background="#012456" Foreground="#EEEEEE" BorderThickness="0" IsReadOnly="True" VerticalScrollBarVisibility="Auto" FontFamily="Consolas,Courier New" FontSize="11" Padding="8,6">
+                        <RichTextBox.Resources>
+                            <Style TargetType="Paragraph">
+                                <Setter Property="Margin" Value="0,1,0,1"/>
+                                <Setter Property="LineHeight" Value="14"/>
+                            </Style>
+                        </RichTextBox.Resources>
+                    </RichTextBox>
+                </Grid>
+            </Border>
+
+            <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Background="{StaticResource BorderDefault}"/>
+
+            <!-- RIGHT: Server stdin/stdout Console (.NET Wrapper) -->
+            <Border Grid.Column="2" BorderBrush="{StaticResource BorderDefault}" BorderThickness="1" CornerRadius="5">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Border Grid.Row="0" Background="{StaticResource BgCard}" CornerRadius="5,5,0,0" Padding="10,6" BorderBrush="{StaticResource BorderDefault}" BorderThickness="0,0,0,1">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Server Console (stdin/stdout)" Foreground="{StaticResource TextPrimary}" FontSize="11" FontWeight="Bold" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                            <Button Grid.Column="1" x:Name="btnClearServerLog" Content="Clear" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" Padding="10,4"/>
+                        </Grid>
+                    </Border>
+                    <RichTextBox x:Name="rtbServerLog" Grid.Row="1" Background="#1E1E1E" Foreground="#DCDCDC" BorderThickness="0" IsReadOnly="True" VerticalScrollBarVisibility="Auto" FontFamily="Consolas,Courier New" FontSize="11" Padding="8,6">
+                        <RichTextBox.Resources>
+                            <Style TargetType="Paragraph">
+                                <Setter Property="Margin" Value="0,1,0,1"/>
+                                <Setter Property="LineHeight" Value="14"/>
+                            </Style>
+                        </RichTextBox.Resources>
+                    </RichTextBox>
+                    <Border Grid.Row="2" Background="{StaticResource BgCard}" BorderBrush="{StaticResource BorderDefault}" BorderThickness="0,1,0,0" Padding="6,5">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text=">" FontWeight="Bold" Foreground="{StaticResource AccentGreen}" VerticalAlignment="Center" Margin="4,0,6,0" FontFamily="Consolas"/>
+                            <TextBox Grid.Column="1" x:Name="txtServerCommand" Style="{StaticResource LightTextBox}" Tag="Type a server command and press Enter (e.g. say hello, list, stop)"/>
+                            <Button Grid.Column="2" x:Name="btnSendCommand" Content="Send" Background="{StaticResource AccentGreen}" Style="{StaticResource ActionButton}" Padding="14,4"/>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Border>
+        </Grid>
     </Grid>
 </Window>
 "@
 
 # ─── GUI Runspace ─────────────────────────────────────────────────────────────
- $guiRunspace = [RunspaceFactory]::CreateRunspace()
- $guiRunspace.ApartmentState = "STA"
- $guiRunspace.ThreadOptions  = "ReuseThread"
- $guiRunspace.Open()
- $guiRunspace.SessionStateProxy.SetVariable("sharedState", $script:sharedState)
- $guiRunspace.SessionStateProxy.SetVariable("xamlString",  $xamlString)
+$guiRunspace = [RunspaceFactory]::CreateRunspace()
+$guiRunspace.ApartmentState = "STA"
+$guiRunspace.ThreadOptions  = "ReuseThread"
+$guiRunspace.Open()
+$guiRunspace.SessionStateProxy.SetVariable("sharedState", $script:sharedState)
+$guiRunspace.SessionStateProxy.SetVariable("xamlString",  $xamlString)
 
- $guiPowerShell = [PowerShell]::Create()
- $guiPowerShell.Runspace = $guiRunspace
+$guiPowerShell = [PowerShell]::Create()
+$guiPowerShell.Runspace = $guiRunspace
 
- $guiPowerShell.AddScript({
+$guiPowerShell.AddScript({
 
     Add-Type -AssemblyName PresentationFramework
     Add-Type -AssemblyName PresentationCore
@@ -673,7 +683,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 }
             } catch { }
         }
-        # Re-derive paths
         $sharedState.ServerPath     = Join-Path $sharedState.RootPath "Server"
         $sharedState.BackupPath     = Join-Path $sharedState.RootPath "Backups"
         $sharedState.LogsPath       = Join-Path $sharedState.RootPath "Logs"
@@ -686,7 +695,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     $txtRootPath         = $window.FindName("txtRootPath")
     $btnBrowse           = $window.FindName("btnBrowse")
     $btnOpenFolder       = $window.FindName("btnOpenFolder")
-    
     $lblInstalled        = $window.FindName("lblInstalled")
     $lblLatest           = $window.FindName("lblLatest")
     $lblServerStatus     = $window.FindName("lblServerStatus")
@@ -694,19 +702,16 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     $lblIpPort           = $window.FindName("lblIpPort")
     $lblSetupStatus      = $window.FindName("lblSetupStatus")
     $lblUpdateStatus     = $window.FindName("lblUpdateStatus")
-    
     $lblInstallDir       = $window.FindName("lblInstallDir")
     $lblBackupDir        = $window.FindName("lblBackupDir")
     $lblPcUptime         = $window.FindName("lblPcUptime")
     $lblLogFile          = $window.FindName("lblLogFile")
     $lblServerUptime     = $window.FindName("lblServerUptime")
     $lblLastBackup       = $window.FindName("lblLastBackup")
-    
     $lblNextCheck        = $window.FindName("lblNextCheck")
     $dotPeriodic         = $window.FindName("dotPeriodic")
     $progressBar         = $window.FindName("progressBar")
     $lblProgressText     = $window.FindName("lblProgressText")
-    
     $chkAutoStart        = $window.FindName("chkAutoStart")
     $chkAutoLaunch       = $window.FindName("chkAutoLaunch")
     $chkCrashProtect     = $window.FindName("chkCrashProtect")
@@ -717,13 +722,18 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     $btnApplySettings    = $window.FindName("btnApplySettings")
 
     $rtbLog              = $window.FindName("rtbLog")
+    $rtbServerLog        = $window.FindName("rtbServerLog")
+    $txtServerCommand    = $window.FindName("txtServerCommand")
+    $btnSendCommand      = $window.FindName("btnSendCommand")
+    $btnClearLog         = $window.FindName("btnClearLog")
+    $btnClearServerLog   = $window.FindName("btnClearServerLog")
+
     $btnFirstSetup       = $window.FindName("btnFirstSetup")
     $btnCheckUpdate      = $window.FindName("btnCheckUpdate")
     $btnUpdate           = $window.FindName("btnUpdate")
     $btnStartServer      = $window.FindName("btnStartServer")
     $btnStopServer       = $window.FindName("btnStopServer")
     $btnRefresh          = $window.FindName("btnRefresh")
-    $btnClearLog         = $window.FindName("btnClearLog")
     $btnBackupNow        = $window.FindName("btnBackupNow")
     $btnRestoreBackup    = $window.FindName("btnRestoreBackup")
 
@@ -739,21 +749,9 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
     $lblHostname.Text = [System.Net.Dns]::GetHostName()
 
-    # Event Handlers for path labels
-    $lblInstallDir.Add_MouseLeftButtonUp({
-        $p = $sharedState.ServerPath
-        if (Test-Path $p) { Start-Process explorer.exe $p }
-    })
-    $lblBackupDir.Add_MouseLeftButtonUp({
-        $p = $sharedState.BackupPath
-        if (Test-Path $p) { Start-Process explorer.exe $p }
-        else { [System.Windows.MessageBox]::Show("Backup folder does not exist yet.", "Not Found", "OK", "Information") | Out-Null }
-    })
-    $lblLogFile.Add_MouseLeftButtonUp({
-        $p = Join-Path $sharedState.LogsPath "BedrockServerManager_$(Get-Date -Format 'yyyyMMdd').log"
-        if (Test-Path $p) { Start-Process notepad.exe $p }
-        else { [System.Windows.MessageBox]::Show("Log file does not exist yet.", "Not Found", "OK", "Information") | Out-Null }
-    })
+    $lblInstallDir.Add_MouseLeftButtonUp({ $p = $sharedState.ServerPath; if (Test-Path $p) { Start-Process explorer.exe $p } })
+    $lblBackupDir.Add_MouseLeftButtonUp({ $p = $sharedState.BackupPath; if (Test-Path $p) { Start-Process explorer.exe $p } else { [System.Windows.MessageBox]::Show("Backup folder does not exist yet.", "Not Found", "OK", "Information") | Out-Null } })
+    $lblLogFile.Add_MouseLeftButtonUp({ $p = Join-Path $sharedState.LogsPath "BedrockServerManager_$(Get-Date -Format 'yyyyMMdd').log"; if (Test-Path $p) { Start-Process notepad.exe $p } else { [System.Windows.MessageBox]::Show("Log file does not exist yet.", "Not Found", "OK", "Information") | Out-Null } })
 
     function Update-PathLabels {
         $lblInstallDir.Text = $sharedState.ServerPath
@@ -762,7 +760,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     }
     Update-PathLabels
 
-    # Pre-Freeze Brushes
     $colourMap = @{
         "INFO"     = "#EEEEEE"
         "WARN"     = "#FFB347"
@@ -780,18 +777,27 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
         "gray"   = "#546E7A"
         "white"  = "#212121"
     }
+    # Server console colour map (subtler — Bedrock output)
+    $serverColourMap = @{
+        "INFO"    = "#DCDCDC"
+        "WARN"    = "#FFD27F"
+        "ERROR"   = "#FF7B7B"
+        "SUCCESS" = "#9CCC65"
+        "CMD"     = "#80CBC4"
+        "SYSTEM"  = "#90A4AE"
+    }
 
     $brushCache = @{}
     foreach ($key in $colourMap.Keys) {
-        $br = [System.Windows.Media.BrushConverter]::new().ConvertFromString($colourMap[$key])
-        $br.Freeze()
-        $brushCache[$key] = $br
+        $br = [System.Windows.Media.BrushConverter]::new().ConvertFromString($colourMap[$key]); $br.Freeze(); $brushCache[$key] = $br
     }
     $statusBrushCache = @{}
     foreach ($key in $statusColourMap.Keys) {
-        $br = [System.Windows.Media.BrushConverter]::new().ConvertFromString($statusColourMap[$key])
-        $br.Freeze()
-        $statusBrushCache[$key] = $br
+        $br = [System.Windows.Media.BrushConverter]::new().ConvertFromString($statusColourMap[$key]); $br.Freeze(); $statusBrushCache[$key] = $br
+    }
+    $serverBrushCache = @{}
+    foreach ($key in $serverColourMap.Keys) {
+        $br = [System.Windows.Media.BrushConverter]::new().ConvertFromString($serverColourMap[$key]); $br.Freeze(); $serverBrushCache[$key] = $br
     }
 
     function Update-ButtonStates {
@@ -819,25 +825,28 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             $btnOpenFolder.IsEnabled  = $true
             $txtRootPath.IsEnabled    = $true
             $btnApplySettings.IsEnabled = $true
-            
             $canBackupRestore = $sharedState.IsInstalled -and -not $sharedState.IsRunning
             $btnBackupNow.IsEnabled     = $canBackupRestore
             $btnRestoreBackup.IsEnabled = $canBackupRestore
         }
+        # The command input is enabled whenever the wrapped server process is alive
+        $canSendCmd = $sharedState.IsRunning -and $sharedState.ServerProcess -and -not $sharedState.ServerProcess.HasExited
+        $txtServerCommand.IsEnabled = $canSendCmd
+        $btnSendCommand.IsEnabled   = $canSendCmd
     }
 
     $script:activeJobs = [System.Collections.ArrayList]::new()
     $script:nextUpdateCheck = [datetime]::Now.AddHours($sharedState.UpdateCheckHours)
     $script:lastGcTime = [datetime]::Now
-    
     $script:pcBootTime = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
     $script:tickCount = 0
+    $script:commandHistoryIdx = -1
 
     $timer = New-Object System.Windows.Threading.DispatcherTimer
-    $timer.Interval = [TimeSpan]::FromMilliseconds(500)
+    $timer.Interval = [TimeSpan]::FromMilliseconds(300)
     $timer.Add_Tick({
 
-        # 1. Process Pending Messages
+        # 1. Process Pending Manager Messages
         $msgCount = [Math]::Min(50, $sharedState.PendingMessages.Count)
         if ($msgCount -gt 0) {
             $msgs = @()
@@ -851,7 +860,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             } finally {
                 [System.Threading.Monitor]::Exit($sharedState.PendingMessages.SyncRoot)
             }
-            
             foreach ($m in $msgs) {
                 $c = if ($brushCache.ContainsKey($m.Level)) { $brushCache[$m.Level] } else { $brushCache["INFO"] }
                 $para = New-Object System.Windows.Documents.Paragraph
@@ -860,7 +868,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 $para.Inlines.Add($run)
                 $rtbLog.Document.Blocks.Add($para)
             }
-            
             while ($rtbLog.Document.Blocks.Count -gt 500) {
                 $block = $rtbLog.Document.Blocks.FirstBlock
                 $rtbLog.Document.Blocks.Remove($block)
@@ -869,33 +876,76 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             $rtbLog.ScrollToEnd()
         }
 
-        # 2. Process Pending Status Updates
+        # 1b. Process Pending Server Console Messages
+        $srvCount = [Math]::Min(100, $sharedState.ServerConsoleMessages.Count)
+        if ($srvCount -gt 0) {
+            $smsgs = @()
+            [System.Threading.Monitor]::Enter($sharedState.ServerConsoleMessages.SyncRoot)
+            try {
+                $smsgs = $sharedState.ServerConsoleMessages.GetRange(0, $srvCount).ToArray()
+                $sharedState.ServerConsoleMessages.RemoveRange(0, $srvCount)
+            } catch {
+                $smsgs = $sharedState.ServerConsoleMessages.ToArray()
+                $sharedState.ServerConsoleMessages.Clear()
+            } finally {
+                [System.Threading.Monitor]::Exit($sharedState.ServerConsoleMessages.SyncRoot)
+            }
+            foreach ($m in $smsgs) {
+                $c = if ($serverBrushCache.ContainsKey($m.Level)) { $serverBrushCache[$m.Level] } else { $serverBrushCache["INFO"] }
+                $para = New-Object System.Windows.Documents.Paragraph
+                $run  = New-Object System.Windows.Documents.Run($m.Text)
+                $run.Foreground = $c
+                $para.Inlines.Add($run)
+                $rtbServerLog.Document.Blocks.Add($para)
+            }
+            while ($rtbServerLog.Document.Blocks.Count -gt $sharedState.MaxServerConsoleLines) {
+                $block = $rtbServerLog.Document.Blocks.FirstBlock
+                $rtbServerLog.Document.Blocks.Remove($block)
+                if ($block) { $block.Clear() }
+            }
+            $rtbServerLog.ScrollToEnd()
+        }
+
+        # 1c. Process Pending Server Commands (typed in GUI)
+        if ($sharedState.PendingServerCommands.Count -gt 0) {
+            $cmds = @()
+            [System.Threading.Monitor]::Enter($sharedState.PendingServerCommands.SyncRoot)
+            try { $cmds = $sharedState.PendingServerCommands.ToArray(); $sharedState.PendingServerCommands.Clear() }
+            finally { [System.Threading.Monitor]::Exit($sharedState.PendingServerCommands.SyncRoot) }
+            foreach ($c in $cmds) {
+                if ($sharedState.ServerProcess -and -not $sharedState.ServerProcess.HasExited) {
+                    try {
+                        $sharedState.ServerProcess.StandardInput.WriteLine($c)
+                        $sharedState.ServerProcess.StandardInput.Flush()
+                        # Echo into server console panel as a CMD line
+                        [System.Threading.Monitor]::Enter($sharedState.ServerConsoleMessages.SyncRoot)
+                        try { $sharedState.ServerConsoleMessages.Add(@{ Text = "> $c"; Level = "CMD" }) | Out-Null }
+                        finally { [System.Threading.Monitor]::Exit($sharedState.ServerConsoleMessages.SyncRoot) }
+                    } catch {
+                        Append-LogLine "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [ERROR  ] Failed to send command '$c': $($_.Exception.Message)" "ERROR"
+                    }
+                }
+            }
+        }
+
+        # 2. Status Updates
         if ($sharedState.PendingStatus.Count -gt 0) {
             $updates = @()
             [System.Threading.Monitor]::Enter($sharedState.PendingStatus.SyncRoot)
-            try {
-                $updates = $sharedState.PendingStatus.ToArray()
-                $sharedState.PendingStatus.Clear()
-            } finally {
-                [System.Threading.Monitor]::Exit($sharedState.PendingStatus.SyncRoot)
-            }
+            try { $updates = $sharedState.PendingStatus.ToArray(); $sharedState.PendingStatus.Clear() }
+            finally { [System.Threading.Monitor]::Exit($sharedState.PendingStatus.SyncRoot) }
             foreach ($u in $updates) {
                 $ctrl = $window.FindName($u.Control)
                 if ($ctrl) {
                     $ctrl.Text = $u.Text
                     try {
-                        if ($statusBrushCache.ContainsKey($u.Colour)) {
-                            $ctrl.Foreground = $statusBrushCache[$u.Colour]
-                        } else {
-                            $dynBr = [System.Windows.Media.BrushConverter]::new().ConvertFromString($u.Colour)
-                            $dynBr.Freeze()
-                            $ctrl.Foreground = $dynBr
+                        if ($statusBrushCache.ContainsKey($u.Colour)) { $ctrl.Foreground = $statusBrushCache[$u.Colour] }
+                        else {
+                            $dynBr = [System.Windows.Media.BrushConverter]::new().ConvertFromString($u.Colour); $dynBr.Freeze(); $ctrl.Foreground = $dynBr
                         }
                     } catch { }
                 }
-                if ($u.Control -eq "lblInstallDir" -or $u.Control -eq "txtRootPath") {
-                    Update-PathLabels
-                }
+                if ($u.Control -eq "lblInstallDir" -or $u.Control -eq "txtRootPath") { Update-PathLabels }
             }
         }
 
@@ -917,16 +967,12 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             }
         }
 
-        # 4. Button State Updates
+        # 4. Button State
         if ($sharedState.PendingButtons.Count -gt 0) {
             $btnUpds = @()
             [System.Threading.Monitor]::Enter($sharedState.PendingButtons.SyncRoot)
-            try {
-                $btnUpds = $sharedState.PendingButtons.ToArray()
-                $sharedState.PendingButtons.Clear()
-            } finally {
-                [System.Threading.Monitor]::Exit($sharedState.PendingButtons.SyncRoot)
-            }
+            try { $btnUpds = $sharedState.PendingButtons.ToArray(); $sharedState.PendingButtons.Clear() }
+            finally { [System.Threading.Monitor]::Exit($sharedState.PendingButtons.SyncRoot) }
             foreach ($b in $btnUpds) {
                 if ($b.Action -eq "busy") { $sharedState.IsBusy = $true }
                 elseif ($b.Action -eq "free") { $sharedState.IsBusy = $false }
@@ -934,79 +980,58 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
         }
         Update-ButtonStates
 
-        # 5. Dashboard Updates (Every 5 seconds / 10 ticks)
+        # 5. Dashboard Updates (Every 5 seconds / ~17 ticks @ 300ms)
         $script:tickCount++
-        if ($script:tickCount % 10 -eq 0) {
-            # Update PC Uptime
+        if ($script:tickCount % 17 -eq 0) {
             if ($script:pcBootTime) {
                 $pcUp = [timespan]([datetime]::Now - $script:pcBootTime)
                 $lblPcUptime.Text = "{0}d {1}h {2}m" -f $pcUp.Days, $pcUp.Hours, $pcUp.Minutes
             }
-
-            # Update Server Uptime
             if ($sharedState.IsRunning -and $sharedState.ServerStartTime) {
                 try {
                     $srvUp = [timespan]([datetime]::Now - $sharedState.ServerStartTime)
                     $lblServerUptime.Text = "{0}d {1}h {2}m" -f $srvUp.Days, $srvUp.Hours, $srvUp.Minutes
-                } catch {
-                    $lblServerUptime.Text = "—"
-                }
-            } else {
-                $lblServerUptime.Text = "—"
-            }
-
-            # Update Last Backup Time
+                } catch { $lblServerUptime.Text = "—" }
+            } else { $lblServerUptime.Text = "—" }
             $backupRoot = $sharedState.BackupPath
             if (Test-Path $backupRoot) {
                 $latestZip = Get-ChildItem $backupRoot -Filter "full_backup_*.zip" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                if ($latestZip) {
-                    $lblLastBackup.Text = $latestZip.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
-                } else {
-                    $lblLastBackup.Text = "None"
-                }
-            } else {
-                $lblLastBackup.Text = "None"
-            }
+                if ($latestZip) { $lblLastBackup.Text = $latestZip.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss") } else { $lblLastBackup.Text = "None" }
+            } else { $lblLastBackup.Text = "None" }
         }
 
-        # 6. Crash Protection Monitor
+        # 6. Crash Protection
         if (-not $sharedState.IsBusy -and $sharedState.ExpectedToRun -and $sharedState.CrashProtection) {
             $exeName = [System.IO.Path]::GetFileNameWithoutExtension($sharedState.ServerExecutable)
             $exePath = Join-Path $sharedState.ServerPath $sharedState.ServerExecutable
             if (Test-Path $exePath) {
-                # Simpler, more reliable check for crash protection
                 $proc = Get-Process -Name $exeName -ErrorAction SilentlyContinue | Select-Object -First 1
                 if (-not $proc -and $sharedState.IsRunning) {
                     $sharedState.IsRunning = $false
                     $sharedState.ServerStartTime = $null
+                    $sharedState.ServerProcess = $null
                     $errBrush = $brushCache["ERROR"]
                     $redBrush = $statusBrushCache["red"]
                     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-                    
                     $para = New-Object System.Windows.Documents.Paragraph
                     $run  = New-Object System.Windows.Documents.Run("$ts [ERROR  ] Crash detected! Server process missing. Attempting recovery...")
                     $run.Foreground = $errBrush
                     $para.Inlines.Add($run)
                     $rtbLog.Document.Blocks.Add($para)
                     $rtbLog.ScrollToEnd()
-                    
                     $lblServerStatus.Text = "CRASHED - RECOVERING"
                     $lblServerStatus.Foreground = $redBrush
-                    
-                    Start-BackgroundWork -Work {
-                        Start-ServerProcess
-                    }
+                    Start-BackgroundWork -Work { Start-ServerProcess }
                 }
             }
         }
 
-        # 7. Periodic Update Check Monitor
+        # 7. Periodic Update Check
         if ($sharedState.AutoCheckUpdates -and -not $sharedState.IsBusy) {
             $ts = $script:nextUpdateCheck - [datetime]::Now
             if ($ts.TotalSeconds -le 0) {
                 $script:nextUpdateCheck = [datetime]::Now.AddHours($sharedState.UpdateCheckHours)
                 $dotPeriodic.Fill = $statusBrushCache["orange"]
-
                 Start-BackgroundWork -Work {
                     Set-Busy $true
                     try { Periodic-StatusCheck } finally { Set-Busy $false }
@@ -1022,7 +1047,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             $dotPeriodic.Fill = $statusBrushCache["gray"]
         }
 
-        # 8. Cleanup completed background jobs
+        # 8. Cleanup background jobs
         if ($script:activeJobs.Count -gt 0) {
             $completed = @()
             foreach ($job in $script:activeJobs) {
@@ -1041,7 +1066,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             }
         }
 
-        # 9. Garbage Collection (Every 5 minutes)
+        # 9. GC (Every 5 minutes)
         if (([datetime]::Now - $script:lastGcTime).TotalMinutes -ge 5) {
             $script:lastGcTime = [datetime]::Now
             [System.GC]::Collect()
@@ -1052,6 +1077,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     })
     $timer.Start()
 
+    # Path / Settings handlers
     $txtRootPath.Add_TextChanged({
         $sharedState.RootPath = $txtRootPath.Text
         $sharedState.ServerPath     = Join-Path $sharedState.RootPath "Server"
@@ -1062,21 +1088,17 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     })
 
     $btnApplySettings.Add_Click({
-        $valHrs = 0
-        $valBak = 0
+        $valHrs = 0; $valBak = 0
         if ([int]::TryParse($txtInterval.Text, [ref]$valHrs) -and $valHrs -ge 1 -and
             [int]::TryParse($txtMaxBackups.Text, [ref]$valBak) -and $valBak -ge 1) {
-            
             $sharedState.UpdateCheckHours    = $valHrs
             $script:nextUpdateCheck          = [datetime]::Now.AddHours($valHrs)
             $sharedState.MaxBackups          = $valBak
-            
             $sharedState.StartAfterUpdate    = $chkAutoStart.IsChecked
             $sharedState.AutoLaunchOnStart   = $chkAutoLaunch.IsChecked
             $sharedState.CrashProtection     = $chkCrashProtect.IsChecked
             $sharedState.AutoCheckUpdates    = $chkAutoCheckUpdates.IsChecked
             $sharedState.AutoApplyUpdates    = $chkAutoApplyUpdates.IsChecked
-            
             Append-LogLine "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [SYSTEM ] Settings applied successfully." "SUCCESS"
             Update-ButtonStates
             Save-Config
@@ -1109,6 +1131,53 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
     })
 
     $btnClearLog.Add_Click({ $rtbLog.Document.Blocks.Clear() })
+    $btnClearServerLog.Add_Click({ $rtbServerLog.Document.Blocks.Clear() })
+
+    # ─── Server command input handlers ──────────────────────────────────────
+    function Send-CommandFromTextBox {
+        $cmd = $txtServerCommand.Text
+        if ([string]::IsNullOrWhiteSpace($cmd)) { return }
+        if (-not $sharedState.IsRunning -or -not $sharedState.ServerProcess) {
+            [System.Windows.MessageBox]::Show("Server is not running.", "Cannot send command", "OK", "Warning") | Out-Null
+            return
+        }
+        # Queue the command — the timer tick will write it to StandardInput
+        [System.Threading.Monitor]::Enter($sharedState.PendingServerCommands.SyncRoot)
+        try { $sharedState.PendingServerCommands.Add($cmd) | Out-Null }
+        finally { [System.Threading.Monitor]::Exit($sharedState.PendingServerCommands.SyncRoot) }
+
+        # Track command history (up-arrow recall)
+        $sharedState.ServerConsoleHistory.Add($cmd) | Out-Null
+        $script:commandHistoryIdx = $sharedState.ServerConsoleHistory.Count
+
+        $txtServerCommand.Clear()
+    }
+    $btnSendCommand.Add_Click({ Send-CommandFromTextBox })
+    $txtServerCommand.Add_KeyDown({
+        if ($_.Key -eq [System.Windows.Input.Key]::Enter) {
+            Send-CommandFromTextBox
+            $_.Handled = $true
+        } elseif ($_.Key -eq [System.Windows.Input.Key]::Up) {
+            if ($sharedState.ServerConsoleHistory.Count -gt 0) {
+                if ($script:commandHistoryIdx -gt 0) { $script:commandHistoryIdx-- }
+                $txtServerCommand.Text = $sharedState.ServerConsoleHistory[$script:commandHistoryIdx]
+                $txtServerCommand.CaretIndex = $txtServerCommand.Text.Length
+            }
+            $_.Handled = $true
+        } elseif ($_.Key -eq [System.Windows.Input.Key]::Down) {
+            if ($sharedState.ServerConsoleHistory.Count -gt 0) {
+                if ($script:commandHistoryIdx -lt ($sharedState.ServerConsoleHistory.Count - 1)) {
+                    $script:commandHistoryIdx++
+                    $txtServerCommand.Text = $sharedState.ServerConsoleHistory[$script:commandHistoryIdx]
+                } else {
+                    $script:commandHistoryIdx = $sharedState.ServerConsoleHistory.Count
+                    $txtServerCommand.Text = ""
+                }
+                $txtServerCommand.CaretIndex = $txtServerCommand.Text.Length
+            }
+            $_.Handled = $true
+        }
+    })
 
     function Append-LogLine {
         param([string]$text, [string]$colour)
@@ -1117,14 +1186,19 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
         finally { [System.Threading.Monitor]::Exit($sharedState.PendingMessages.SyncRoot) }
     }
 
+    function Append-ServerLine {
+        param([string]$text, [string]$colour = "INFO")
+        [System.Threading.Monitor]::Enter($sharedState.ServerConsoleMessages.SyncRoot)
+        try { $sharedState.ServerConsoleMessages.Add(@{ Text = $text; Level = $colour }) | Out-Null }
+        finally { [System.Threading.Monitor]::Exit($sharedState.ServerConsoleMessages.SyncRoot) }
+    }
+
     function Start-BackgroundWork {
         param([ScriptBlock]$Work)
-
         $bgRS = [RunspaceFactory]::CreateRunspace()
         $bgRS.ApartmentState = "MTA"
         $bgRS.Open()
         $bgRS.SessionStateProxy.SetVariable("state", $sharedState)
-
         $bgPS = [PowerShell]::Create()
         $bgPS.Runspace = $bgRS
 
@@ -1133,23 +1207,27 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 param([string]$Message, [string]$Level = "INFO")
                 $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
                 $entry = "$ts [$($Level.PadRight(7))] $Message"
-                
                 [System.Threading.Monitor]::Enter($state.PendingMessages.SyncRoot)
                 try { $state.PendingMessages.Add(@{ Text = $entry; Level = $Level }) | Out-Null }
                 finally { [System.Threading.Monitor]::Exit($state.PendingMessages.SyncRoot) }
-
                 try {
                     $logFile = "BedrockServerManager_$(Get-Date -Format 'yyyyMMdd').log"
                     $logPath = Join-Path $state.LogsPath $logFile
                     $logDir  = Split-Path $logPath -Parent
                     if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
-                    
                     Add-Content -Path $logPath -Value $entry -ErrorAction SilentlyContinue
-                    
                     Get-ChildItem -Path $logDir -Filter "BedrockServerManager_*.log" -ErrorAction SilentlyContinue | 
                         Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$state.LogRetentionDays) } | 
                         Remove-Item -Force -ErrorAction SilentlyContinue
                 } catch { }
+            }
+
+            # Push a line into the SERVER console panel
+            function Write-ServerConsole {
+                param([string]$Message, [string]$Level = "INFO")
+                [System.Threading.Monitor]::Enter($state.ServerConsoleMessages.SyncRoot)
+                try { $state.ServerConsoleMessages.Add(@{ Text = $Message; Level = $Level }) | Out-Null }
+                finally { [System.Threading.Monitor]::Exit($state.ServerConsoleMessages.SyncRoot) }
             }
 
             function Set-StatusLabel {
@@ -1175,58 +1253,35 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             function Get-RunningServer {
                 $exeName = [System.IO.Path]::GetFileNameWithoutExtension($state.ServerExecutable)
                 $exePath = Join-Path $state.ServerPath $state.ServerExecutable
-                
+                # If we own the wrapped process, prefer it
+                if ($state.ServerProcess -and -not $state.ServerProcess.HasExited) { return $state.ServerProcess }
                 $procs = Get-Process -Name $exeName -ErrorAction SilentlyContinue
                 if (-not $procs) { return $null }
-                
                 $procList = @($procs)
-                
-                # If only one process matches the name, just assume it's ours
                 if ($procList.Count -eq 1) { return $procList[0] }
-                
-                # If multiple match, we have to check the path
                 foreach ($p in $procList) {
-                    try {
-                        $pPath = $p.Path
-                        if ($pPath -and ($pPath -eq $exePath)) { return $p }
-                    } catch {}
+                    try { if ($p.Path -and ($p.Path -eq $exePath)) { return $p } } catch {}
                 }
                 return $null
             }
 
             function Get-AppliedVersion {
                 $vPath = Join-Path $state.ServerPath "applied_version.txt"
-                if (Test-Path $vPath) {
-                    return (Get-Content $vPath -ErrorAction SilentlyContinue).Trim()
-                }
+                if (Test-Path $vPath) { return (Get-Content $vPath -ErrorAction SilentlyContinue).Trim() }
                 return $null
             }
-
-            function Set-AppliedVersion {
-                param([string]$Version)
-                $vPath = Join-Path $state.ServerPath "applied_version.txt"
-                Set-Content -Path $vPath -Value $Version -Force -ErrorAction SilentlyContinue
-            }
-
+            function Set-AppliedVersion { param([string]$Version); Set-Content -Path (Join-Path $state.ServerPath "applied_version.txt") -Value $Version -Force -ErrorAction SilentlyContinue }
             function Get-InstalledVersion {
                 $exe = Join-Path $state.ServerPath $state.ServerExecutable
                 if (Test-Path $exe) {
                     $vi = (Get-Item $exe).VersionInfo
-                    $v = $vi.ProductVersion
-                    if (-not $v) { $v = $vi.FileVersion } 
+                    $v = $vi.ProductVersion; if (-not $v) { $v = $vi.FileVersion } 
                     if ($v -and $v.Trim() -ne "") { return $v.Trim() }
-                    
-                    $appliedVer = Get-AppliedVersion
-                    if ($appliedVer) { return $appliedVer }
-                    
-                    return $null
+                    $appliedVer = Get-AppliedVersion; if ($appliedVer) { return $appliedVer }
                 }
                 return $null
             }
-
-            function Test-ServerInstalled {
-                return (Test-Path (Join-Path $state.ServerPath $state.ServerExecutable))
-            }
+            function Test-ServerInstalled { return (Test-Path (Join-Path $state.ServerPath $state.ServerExecutable)) }
 
             function Initialize-ServerDirectories {
                 foreach ($d in @($state.RootPath, $state.ServerPath, $state.BackupPath, $state.LogsPath, $state.UpdateTempPath)) {
@@ -1239,18 +1294,43 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
             function Stop-GameServer {
                 $proc = Get-RunningServer
-                if (-not $proc) { return }
+                if (-not $proc) {
+                    $state.IsRunning = $false
+                    $state.ExpectedToRun = $false
+                    $state.ServerStartTime = $null
+                    $state.ServerProcess = $null
+                    return
+                }
                 Write-Log "Stopping server (PID $($proc.Id))..." -Level WARN
                 Set-StatusLabel "lblServerStatus" "STOPPING…" "orange"
-                $proc | Stop-Process -Force:$false -ErrorAction SilentlyContinue
+
+                # NEW: Try graceful stop via stdin first (since we own the StandardInput wrapper)
+                $stdinStopSent = $false
+                if ($state.ServerProcess -and -not $state.ServerProcess.HasExited) {
+                    try {
+                        $state.ServerProcess.StandardInput.WriteLine("stop")
+                        $state.ServerProcess.StandardInput.Flush()
+                        $stdinStopSent = $true
+                        Write-ServerConsole "> stop" "CMD"
+                        Write-Log "Sent 'stop' command via stdin (graceful shutdown)." -Level SYSTEM
+                    } catch {
+                        Write-Log "Could not send stdin 'stop': $($_.Exception.Message)" -Level WARN
+                    }
+                }
+
                 $elapsed = 0
                 while ((Get-RunningServer) -and $elapsed -lt $state.ServerStopTimeout) {
                     Start-Sleep -Seconds 1; $elapsed++
                 }
                 if (Get-RunningServer) {
-                    Write-Log "Force-killing server..." -Level WARN
+                    Write-Log "Server did not exit in $($state.ServerStopTimeout)s. Force-killing..." -Level WARN
                     Get-RunningServer | Stop-Process -Force
                     Start-Sleep -Seconds 2
+                }
+                # Dispose the wrapped process object
+                if ($state.ServerProcess) {
+                    try { $state.ServerProcess.Dispose() } catch {}
+                    $state.ServerProcess = $null
                 }
                 $state.IsRunning = $false
                 $state.ExpectedToRun = $false
@@ -1262,113 +1342,69 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
             function Backup-All {
                 param([bool]$IsManual = $false)
-                
-                if (Get-RunningServer) {
-                    Write-Log "Cannot backup while server is running. Stop the server first." -Level ERROR
-                    return
-                }
-
+                if (Get-RunningServer) { Write-Log "Cannot backup while server is running. Stop the server first." -Level ERROR; return }
                 Write-Log "Starting full backup (Configs + Worlds)..." -Level SYSTEM
-
                 $backupRoot = $state.BackupPath
                 if (-not (Test-Path $backupRoot)) { New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null }
-                
                 $timeStr = Get-Date -Format 'yyyyMMdd_HHmmssfff'
                 $zipName = "full_backup_$timeStr.zip"
                 $zipPath = Join-Path $backupRoot $zipName
                 $stageDir = Join-Path $state.UpdateTempPath "backup_stage_$timeStr"
-                
                 if (-not (Test-Path $stageDir)) { New-Item -ItemType Directory -Path $stageDir -Force | Out-Null }
-
                 try {
                     foreach ($f in $state.FilesToBackup) {
                         $src = Join-Path $state.ServerPath $f
                         if (Test-Path $src) { Copy-Item $src $stageDir -Force -ErrorAction SilentlyContinue }
                     }
-
                     $worldsDir = Join-Path $state.ServerPath "worlds"
-                    if (Test-Path $worldsDir) {
-                        Copy-Item -Path $worldsDir -Destination $stageDir -Recurse -Force -ErrorAction SilentlyContinue
-                    } else {
-                        Write-Log "No 'worlds' directory found. Backing up configs only." -Level WARN
-                    }
-
+                    if (Test-Path $worldsDir) { Copy-Item -Path $worldsDir -Destination $stageDir -Recurse -Force -ErrorAction SilentlyContinue }
+                    else { Write-Log "No 'worlds' directory found. Backing up configs only." -Level WARN }
                     Write-Log "Compressing backup to $zipName... (This may take a moment)" -Level SYSTEM
                     [System.IO.Compression.ZipFile]::CreateFromDirectory($stageDir, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
                     $sizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
                     Write-Log "Backup complete ($sizeMB MB)." -Level SUCCESS
-                    
                     $oldBackups = Get-ChildItem $backupRoot -Filter "full_backup_*.zip" | Sort-Object Name -Descending | Select-Object -Skip $state.MaxBackups
                     if ($oldBackups) {
                         Write-Log "Purging $($oldBackups.Count) old backup(s) to retain max $($state.MaxBackups)..." -Level SYSTEM
                         $oldBackups | Remove-Item -Force
                     }
-                } catch {
-                    Write-Log "Backup failed: $($_.Exception.Message)" -Level ERROR
-                } finally {
-                    if (Test-Path $stageDir) { Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue }
-                }
+                } catch { Write-Log "Backup failed: $($_.Exception.Message)" -Level ERROR }
+                finally { if (Test-Path $stageDir) { Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue } }
             }
 
             function Restore-Backup {
                 param([string]$ZipPath)
-                
-                if (Get-RunningServer) {
-                    Write-Log "Cannot restore while server is running. Stop the server first." -Level ERROR
-                    return
-                }
-
+                if (Get-RunningServer) { Write-Log "Cannot restore while server is running. Stop the server first." -Level ERROR; return }
                 Write-Log "Preparing to restore from $ZipPath..." -Level WARN
-                
                 try {
                     Write-Log "Extracting backup files..." -Level SYSTEM
                     Expand-Archive -LiteralPath $ZipPath -DestinationPath $state.ServerPath -Force
-                    
                     $n = 0
-                    foreach ($f in $state.FilesToBackup) {
-                        $d = Join-Path $state.ServerPath $f
-                        if (Test-Path $d) { $n++ }
-                    }
+                    foreach ($f in $state.FilesToBackup) { $d = Join-Path $state.ServerPath $f; if (Test-Path $d) { $n++ } }
                     Write-Log "Restore complete. $n config file(s) verified." -Level SUCCESS
-                } catch {
-                    Write-Log "Restore failed: $($_.Exception.Message)" -Level ERROR
-                }
+                } catch { Write-Log "Restore failed: $($_.Exception.Message)" -Level ERROR }
             }
 
             function Fetch-LatestVersion {
                 Write-Log "Contacting Minecraft API…" -Level SYSTEM
                 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                 $headers = @{ "User-Agent" = "Mozilla/5.0"; "Accept" = "application/json" }
-                
-                $maxRetries = 3
-                $retryCount = 0
-                $resp = $null
-                
+                $maxRetries = 3; $retryCount = 0; $resp = $null
                 while ($retryCount -lt $maxRetries) {
-                    try {
-                        $resp = Invoke-RestMethod -Uri $state.ApiUrl -Method Get -Headers $headers -TimeoutSec 15
-                        break
-                    } catch {
+                    try { $resp = Invoke-RestMethod -Uri $state.ApiUrl -Method Get -Headers $headers -TimeoutSec 15; break }
+                    catch {
                         $retryCount++
                         if ($retryCount -lt $maxRetries) {
                             Write-Log "API call failed (Attempt $retryCount/$maxRetries): $($_.Exception.Message). Retrying in 5 seconds..." -Level WARN
                             Start-Sleep -Seconds 5
-                        } else {
-                            throw "Failed to contact Minecraft API after $maxRetries attempts: $($_.Exception.Message)"
-                        }
+                        } else { throw "Failed to contact Minecraft API after $maxRetries attempts: $($_.Exception.Message)" }
                     }
                 }
-                
                 $link = $resp.result.links | Where-Object { $_.downloadType -eq "serverBedrockWindows" } | Select-Object -First 1
                 if (-not $link -or -not $link.downloadUrl) { throw "API did not return a valid download URL." }
                 return @{ Url = $link.downloadUrl; Filename = [System.IO.Path]::GetFileName($link.downloadUrl) }
             }
-
-            function Extract-VersionFromFilename {
-                param([string]$Filename)
-                if ($Filename -match "bedrock-server-(.+?)\.zip") { return $matches[1] }
-                return $Filename
-            }
+            function Extract-VersionFromFilename { param([string]$Filename); if ($Filename -match "bedrock-server-(.+?)\.zip") { return $matches[1] }; return $Filename }
 
             function Get-ServerConnectionInfo {
                 $port = "19132"
@@ -1377,10 +1413,8 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     $portLine = Get-Content $propsPath -ErrorAction SilentlyContinue | Where-Object { $_ -match "^server-port=" } | Select-Object -First 1
                     if ($portLine -match "^server-port=(\d+)") { $port = $matches[1] }
                 }
-
                 $ip = "127.0.0.1"
                 try {
-                    # Strict filtering of virtual adapters and invalid IPs
                     $netConfig = Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object {
                         $_.IPv4Address -ne $null -and
                         $_.InterfaceAlias -notmatch "Loopback" -and
@@ -1390,40 +1424,38 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                         $_.IPv4Address.IPAddress -notlike "169.*" -and
                         $_.IPv4Address.IPAddress -ne "127.0.0.1"
                     } | Select-Object -First 1
-                    
-                    if ($netConfig) {
-                        $ip = $netConfig.IPv4Address.IPAddress
-                    }
+                    if ($netConfig) { $ip = $netConfig.IPv4Address.IPAddress }
                 } catch { }
-
                 $hostname = [System.Net.Dns]::GetHostName()
-
                 return @{ Hostname = $hostname; IpPort = "$($ip):$($port)" }
             }
 
+            # ─── Start-ServerProcess — uses .NET stdin/stdout wrapper ──────────
             function Start-ServerProcess {
                 $exe = Join-Path $state.ServerPath $state.ServerExecutable
-                if (-not (Test-Path $exe)) { 
-                    Write-Log "Executable not found at $exe" -Level ERROR
-                    return 
-                }
-                
-                # 1. Check if a server is already running
-                $existingProc = Get-RunningServer
-                if ($existingProc) {
+                if (-not (Test-Path $exe)) { Write-Log "Executable not found at $exe" -Level ERROR; return }
+
+                # 1. Adopt already-running process if present (we will NOT have stdin control in that case)
+                $existingProc = Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($state.ServerExecutable)) -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($existingProc -and (-not $state.ServerProcess -or $state.ServerProcess.HasExited)) {
                     $state.IsRunning = $true
                     $state.ExpectedToRun = $true
+                    $state.ServerProcess = $null  # we don't own stdin
                     $state.ServerStartTime = $existingProc.StartTime
-                    Set-StatusLabel "lblServerStatus" "RUNNING (PID $($existingProc.Id))" "green"
-                    
+                    Set-StatusLabel "lblServerStatus" "RUNNING (PID $($existingProc.Id) — adopted, no stdin)" "green"
                     $connStr = Get-ServerConnectionInfo
                     Set-StatusLabel "lblHostname" $connStr.Hostname "white"
                     Set-StatusLabel "lblIpPort" $connStr.IpPort "blue"
-                    Write-Log "Server is already running (PID $($existingProc.Id)). Adopted process." -Level WARN
+                    Write-Log "Server is already running (PID $($existingProc.Id)). Adopted process — stdin wrapper unavailable for this instance." -Level WARN
+                    Write-ServerConsole "[Adopted process — input not available. Stop and restart to enable command input.]" "SYSTEM"
+                    return
+                }
+                if ($state.ServerProcess -and -not $state.ServerProcess.HasExited) {
+                    Write-Log "Server already running through wrapper (PID $($state.ServerProcess.Id))." -Level WARN
                     return
                 }
 
-                # 2. Try to create firewall rule automatically (Requires Admin)
+                # 2. Firewall rule
                 try {
                     $ruleName = "Minecraft Bedrock Server"
                     $existingRule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
@@ -1431,95 +1463,139 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                         New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Program $exe -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
                         Write-Log "Created Windows Firewall rule to allow inbound traffic." -Level SYSTEM
                     }
-                } catch {
-                    Write-Log "Could not automatically create firewall rule. Windows may prompt you to allow network access." -Level WARN
-                }
+                } catch { Write-Log "Could not automatically create firewall rule. Windows may prompt you to allow network access." -Level WARN }
 
-                Write-Log "Starting server (minimized)…" -Level SYSTEM
+                Write-Log "Starting server with stdin/stdout wrapper…" -Level SYSTEM
                 Set-StatusLabel "lblServerStatus" "STARTING…" "orange"
-                
+
+                # 3. Build ProcessStartInfo with redirected IO
                 $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-                $startInfo.FileName = $exe
-                $startInfo.WorkingDirectory = $state.ServerPath
-                $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Minimized
-                
+                $startInfo.FileName               = $exe
+                $startInfo.WorkingDirectory       = $state.ServerPath
+                $startInfo.UseShellExecute        = $false
+                $startInfo.RedirectStandardInput  = $true
+                $startInfo.RedirectStandardOutput = $true
+                $startInfo.RedirectStandardError  = $true
+                $startInfo.CreateNoWindow         = $true
+                $startInfo.WindowStyle            = [System.Diagnostics.ProcessWindowStyle]::Hidden
+                # Bedrock server writes UTF-8; force the readers to decode as UTF-8
+                $startInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+                $startInfo.StandardErrorEncoding  = [System.Text.Encoding]::UTF8
+
+                $proc = New-Object System.Diagnostics.Process
+                $proc.StartInfo = $startInfo
+                $proc.EnableRaisingEvents = $true
+                $proc.SynchronizingObject = $null
+
+                # 4. Wire up async stdout / stderr handlers
+                # Each event fires on a thread-pool thread; we just push to the synchronized queue.
+                $outAction = {
+                    param($sender, $e)
+                    if ($e.Data -ne $null) {
+                        $line = $e.Data
+                        $level = "INFO"
+                        # Heuristic colour mapping for Bedrock output
+                        if ($line -match "ERROR|FATAL|crashed") { $level = "ERROR" }
+                        elseif ($line -match "WARN|Warning") { $level = "WARN" }
+                        elseif ($line -match "Player connected|Player disconnected|Server started|done") { $level = "SUCCESS" }
+                        [System.Threading.Monitor]::Enter($state.ServerConsoleMessages.SyncRoot)
+                        try { $state.ServerConsoleMessages.Add(@{ Text = $line; Level = $level }) | Out-Null }
+                        finally { [System.Threading.Monitor]::Exit($state.ServerConsoleMessages.SyncRoot) }
+                    }
+                }
+                $errAction = {
+                    param($sender, $e)
+                    if ($e.Data -ne $null) {
+                        [System.Threading.Monitor]::Enter($state.ServerConsoleMessages.SyncRoot)
+                        try { $state.ServerConsoleMessages.Add(@{ Text = $e.Data; Level = "ERROR" }) | Out-Null }
+                        finally { [System.Threading.Monitor]::Exit($state.ServerConsoleMessages.SyncRoot) }
+                    }
+                }
+                $exitedAction = {
+                    try {
+                        if ($state.ServerProcess) {
+                            $code = $state.ServerProcess.ExitCode
+                            Write-ServerConsole "[Process exited with code $code]" "SYSTEM"
+                            Write-Log "Server process exited with code $code." -Level WARN
+                        }
+                    } catch {}
+                }
+                Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action $outAction | Out-Null
+                Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived  -Action $errAction | Out-Null
+                Register-ObjectEvent -InputObject $proc -EventName Exited             -Action $exitedAction | Out-Null
+
                 try {
-                    $proc = [System.Diagnostics.Process]::Start($startInfo)
+                    $started = $proc.Start()
                 } catch {
                     Write-Log "Failed to start server process: $($_.Exception.Message)" -Level ERROR
                     Set-StatusLabel "lblServerStatus" "START FAILED" "red"
                     return
                 }
-                
-                # 3. Wait for it to spin up (Up to 45 seconds to account for firewall prompts and slow disks)
+                if (-not $started) {
+                    Write-Log "Failed to start server process (Start() returned false)." -Level ERROR
+                    Set-StatusLabel "lblServerStatus" "START FAILED" "red"
+                    return
+                }
+
+                # Begin async reads
+                $proc.BeginOutputReadLine()
+                $proc.BeginErrorReadLine()
+
+                $state.ServerProcess = $proc
+
+                # 5. Wait for it to spin up
                 Write-Log "Waiting for server to initialize (up to 45 seconds)..." -Level SYSTEM
-                
                 $runningProc = $null
                 for ($i = 0; $i -lt 15; $i++) {
                     Start-Sleep -Seconds 3
-                    
                     if ($proc.HasExited) {
-                        Write-Log "Server process exited prematurely." -Level ERROR
+                        Write-Log "Server process exited prematurely (code $($proc.ExitCode))." -Level ERROR
                         $runningProc = $null
                         break
                     }
-                    
-                    # Check if the process is still alive and responding
                     $check = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
-                    if ($check -and -not $check.HasExited) {
-                        $runningProc = $check
-                        break
-                    }
+                    if ($check -and -not $check.HasExited) { $runningProc = $check; break }
                 }
-                
+
                 if ($runningProc) {
                     $state.IsRunning = $true
                     $state.ExpectedToRun = $true
                     $state.ServerStartTime = $runningProc.StartTime
                     Set-StatusLabel "lblServerStatus" "RUNNING (PID $($runningProc.Id))" "green"
-                    
                     $connStr = Get-ServerConnectionInfo
                     Set-StatusLabel "lblHostname" $connStr.Hostname "white"
                     Set-StatusLabel "lblIpPort" $connStr.IpPort "blue"
                     Write-Log "Server is listening on $($connStr.Hostname) ($($connStr.IpPort))" -Level SUCCESS
+                    Write-ServerConsole "[Server process started — PID $($runningProc.Id). stdin wrapper active.]" "SYSTEM"
                 } else {
                     $state.IsRunning = $false
                     $state.ExpectedToRun = $false
+                    try { if ($proc) { $proc.Dispose() } } catch {}
+                    $state.ServerProcess = $null
                     Set-StatusLabel "lblServerStatus" "START FAILED" "red"
-                    Write-Log "Server process exited or did not respond in time. Check server logs for configuration errors." -Level ERROR
+                    Write-Log "Server process exited or did not respond in time. Check server console panel for errors." -Level ERROR
                 }
             }
 
             function Refresh-InstalledLabel {
                 $ver = Get-InstalledVersion
-                if ($ver) {
-                    Set-StatusLabel "lblInstalled" $ver "white"
-                    $state.InstalledVersion = $ver
-                }
+                if ($ver) { Set-StatusLabel "lblInstalled" $ver "white"; $state.InstalledVersion = $ver }
             }
 
             function Download-AndInstall {
                 param([string]$Url, [string]$Filename, [bool]$IsFirstSetup)
-
                 $updateDir = $state.UpdateTempPath
                 $zipPath   = Join-Path $updateDir $Filename
-
                 Initialize-ServerDirectories
                 Set-Progress "value" 5
-
                 if (-not $IsFirstSetup) { Stop-GameServer }
                 Set-Progress "value" 12
-
-                if (Test-ServerInstalled) { 
-                    Backup-All 
-                }
+                if (Test-ServerInstalled) { Backup-All }
                 Set-Progress "value" 22
-
                 Write-Log "Downloading: $Filename …"
                 $ProgressPreference = "SilentlyContinue"
                 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                 Invoke-WebRequest -Uri $Url -OutFile $zipPath -TimeoutSec $state.DownloadTimeout
-                
                 if (-not (Test-Path $zipPath) -or (Get-Item $zipPath).Length -lt 1MB) { throw "Download failed or file is too small (corrupt)." }
                 Write-Log "Verifying archive integrity..." -Level SYSTEM
                 try {
@@ -1528,53 +1604,30 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     $zipArchive.Dispose()
                     if ($entries -lt 5) { throw "Archive seems empty or invalid." }
                     Write-Log "Archive verified ($entries entries)." -Level SUCCESS
-                } catch {
-                    throw "Downloaded ZIP archive is corrupt or invalid: $($_.Exception.Message)"
-                }
-
+                } catch { throw "Downloaded ZIP archive is corrupt or invalid: $($_.Exception.Message)" }
                 $sizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
                 Write-Log "Download complete ($sizeMB MB)." -Level SUCCESS
                 Set-Progress "value" 58
-
                 Write-Log "Extracting server files to $($state.ServerPath)…"
-                try {
-                    Expand-Archive -LiteralPath $zipPath -DestinationPath $state.ServerPath -Force
-                } catch {
-                    throw "Extraction failed: $($_.Exception.Message)"
-                }
-                
+                try { Expand-Archive -LiteralPath $zipPath -DestinationPath $state.ServerPath -Force }
+                catch { throw "Extraction failed: $($_.Exception.Message)" }
                 $extractedExe = Join-Path $state.ServerPath $state.ServerExecutable
-                if (-not (Test-Path $extractedExe)) {
-                    throw "Extraction verification failed: $state.ServerExecutable not found."
-                }
+                if (-not (Test-Path $extractedExe)) { throw "Extraction verification failed: $state.ServerExecutable not found." }
                 Write-Log "Extraction complete & verified." -Level SUCCESS
                 Set-Progress "value" 80
-
                 Write-Log "Configs and Worlds preserved via archive backup." -Level SYSTEM
                 Set-Progress "value" 90
-
                 $verLatest = Extract-VersionFromFilename $Filename
                 Set-AppliedVersion -Version $verLatest
-                if (Test-Path $zipPath) {
-                    Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-                    Write-Log "Cleaned up downloaded archive." -Level SYSTEM
-                }
-
+                if (Test-Path $zipPath) { Remove-Item $zipPath -Force -ErrorAction SilentlyContinue; Write-Log "Cleaned up downloaded archive." -Level SYSTEM }
                 Refresh-InstalledLabel
-
                 Set-StatusLabel "lblLatest"       $verLatest    "blue"
                 Set-StatusLabel "lblSetupStatus"  "INSTALLED"   "green"
                 Set-StatusLabel "lblUpdateStatus" "UP TO DATE"  "green"
-                
                 $state.IsInstalled = $true
                 $state.UpdateAvailable = $false
-
-                if ($state.StartAfterUpdate) {
-                    Start-ServerProcess
-                } else {
-                    Set-StatusLabel "lblServerStatus" "STOPPED" "red"
-                }
-
+                if ($state.StartAfterUpdate) { Start-ServerProcess }
+                else { Set-StatusLabel "lblServerStatus" "STOPPED" "red" }
                 Set-StatusLabel "lblLastChecked" (Get-Date -Format "yyyy-MM-dd HH:mm:ss") "gray"
                 Set-Progress "value" 100
                 [System.GC]::Collect()
@@ -1582,19 +1635,10 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
             function Periodic-StatusCheck {
                 Write-Log "── Periodic status check ──" -Level PERIODIC
-
                 if (Test-ServerInstalled) {
                     $state.IsInstalled = $true
-                    
                     $appliedVer = Get-AppliedVersion
-                    if (-not $appliedVer) {
-                        $exeVer = Get-InstalledVersion
-                        if ($exeVer) {
-                            Set-AppliedVersion -Version $exeVer
-                            $appliedVer = $exeVer
-                        }
-                    }
-
+                    if (-not $appliedVer) { $exeVer = Get-InstalledVersion; if ($exeVer) { Set-AppliedVersion -Version $exeVer; $appliedVer = $exeVer } }
                     Refresh-InstalledLabel
                     Set-StatusLabel "lblSetupStatus" "INSTALLED" "green"
                 } else {
@@ -1604,14 +1648,12 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     Set-StatusLabel "lblLastChecked" (Get-Date -Format "yyyy-MM-dd HH:mm:ss") "gray"
                     return
                 }
-
                 $proc = Get-RunningServer
                 if ($proc) {
                     $state.IsRunning = $true
                     $state.ExpectedToRun = $true
                     $state.ServerStartTime = $proc.StartTime
                     Set-StatusLabel "lblServerStatus" "RUNNING (PID $($proc.Id))" "green"
-                    
                     $connStr = Get-ServerConnectionInfo
                     Set-StatusLabel "lblHostname" $connStr.Hostname "white"
                     Set-StatusLabel "lblIpPort" $connStr.IpPort "blue"
@@ -1620,7 +1662,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     Set-StatusLabel "lblServerStatus" "STOPPED" "red"
                     Set-StatusLabel "lblIpPort" "—" "gray"
                 }
-
                 try {
                     $latest  = Fetch-LatestVersion
                     $state.LatestUrl      = $latest.Url
@@ -1628,14 +1669,12 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     $verLatest = Extract-VersionFromFilename $latest.Filename
                     $state.LatestVersion  = $verLatest
                     Set-StatusLabel "lblLatest" $verLatest "blue"
-
                     $currentVer = Get-AppliedVersion
                     if (-not $currentVer) {
                         Write-Log "Installed version unknown. Syncing tracking file to latest ($verLatest) to prevent false update loops." -Level WARN
                         Set-AppliedVersion -Version $verLatest
                         $currentVer = $verLatest
                     }
-
                     if ($currentVer -eq $verLatest) {
                         $state.UpdateAvailable = $false
                         Set-StatusLabel "lblUpdateStatus" "UP TO DATE" "green"
@@ -1643,23 +1682,18 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                         $state.UpdateAvailable = $true
                         Set-StatusLabel "lblUpdateStatus" "UPDATE AVAILABLE" "orange"
                         Write-Log "New version available: $verLatest" -Level WARN
-                        
                         if ($state.AutoApplyUpdates) {
                             Write-Log "Auto-apply enabled. Starting update process..." -Level SYSTEM
                             Download-AndInstall -Url $latest.Url -Filename $latest.Filename -IsFirstSetup $false
                         }
                     }
-                } catch {
-                    Write-Log "Periodic update check failed: $($_.Exception.Message)" -Level WARN
-                }
-
+                } catch { Write-Log "Periodic update check failed: $($_.Exception.Message)" -Level WARN }
                 Set-StatusLabel "lblLastChecked" (Get-Date -Format "yyyy-MM-dd HH:mm:ss") "gray"
                 Write-Log "── Periodic check done ──" -Level PERIODIC
             }
         }
 
         $bgPS.AddScript($helperScript).AddScript($Work).AddScript({ [System.GC]::Collect() })
-
         $handle = $bgPS.BeginInvoke()
         $job = @{ PS = $bgPS; RS = $bgRS; Handle = $handle }
         [System.Threading.Monitor]::Enter($script:activeJobs.SyncRoot)
@@ -1667,21 +1701,16 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
         finally { [System.Threading.Monitor]::Exit($script:activeJobs.SyncRoot) }
     }
 
+    # ── Button click handlers ─────────────────────────────────────────────────
     $btnFirstSetup.Add_Click({
         if ($sharedState.IsBusy) { return }
         Start-BackgroundWork -Work {
-            Set-Busy $true
-            Set-Progress "indeterminate"
+            Set-Busy $true; Set-Progress "indeterminate"
             try {
-                if (Test-ServerInstalled) {
-                    Write-Log "Server is already installed. Use 'Download and Update' instead." -Level WARN
-                    Set-Progress "reset"
-                    return
-                }
+                if (Test-ServerInstalled) { Write-Log "Server is already installed. Use 'Download and Update' instead." -Level WARN; Set-Progress "reset"; return }
                 Write-Log "═══════════════════════════════════════════" -Level HEADER
                 Write-Log "  FIRST-TIME SETUP / FRESH INSTALL"         -Level HEADER
                 Write-Log "═══════════════════════════════════════════" -Level HEADER
-
                 Initialize-ServerDirectories
                 $latest = Fetch-LatestVersion
                 $state.LatestUrl      = $latest.Url
@@ -1689,10 +1718,8 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 $ver = Extract-VersionFromFilename $latest.Filename
                 $state.LatestVersion  = $ver
                 Set-StatusLabel "lblLatest" $ver "blue"
-
                 Download-AndInstall -Url $latest.Url -Filename $latest.Filename -IsFirstSetup $true
                 Refresh-InstalledLabel
-
                 Write-Log "═══════════════════════════════════════════" -Level HEADER
                 Write-Log "  Setup completed successfully!"             -Level SUCCESS
                 Write-Log "═══════════════════════════════════════════" -Level HEADER
@@ -1700,24 +1727,17 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 Write-Log "Setup FAILED: $($_.Exception.Message)" -Level ERROR
                 Set-StatusLabel "lblSetupStatus" "SETUP FAILED" "red"
                 Set-Progress "reset"
-            } finally {
-                Set-Busy $false
-            }
+            } finally { Set-Busy $false }
         }
     })
 
     $btnCheckUpdate.Add_Click({
         if ($sharedState.IsBusy) { return }
         Start-BackgroundWork -Work {
-            Set-Busy $true
-            Set-Progress "indeterminate"
+            Set-Busy $true; Set-Progress "indeterminate"
             try {
                 Write-Log "Checking for updates…"
-                if (-not (Test-ServerInstalled)) {
-                    Write-Log "No installation found." -Level WARN
-                    return
-                }
-
+                if (-not (Test-ServerInstalled)) { Write-Log "No installation found." -Level WARN; return }
                 Refresh-InstalledLabel
                 $latest = Fetch-LatestVersion
                 $state.LatestUrl      = $latest.Url
@@ -1725,14 +1745,8 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 $ver = Extract-VersionFromFilename $latest.Filename
                 $state.LatestVersion  = $ver
                 Set-StatusLabel "lblLatest" $ver "blue"
-
                 $appliedVer = Get-AppliedVersion
-                if (-not $appliedVer) {
-                    Write-Log "Installed version unknown. Syncing tracking file to latest ($ver) to prevent false update loops." -Level WARN
-                    Set-AppliedVersion -Version $ver
-                    $appliedVer = $ver
-                }
-
+                if (-not $appliedVer) { Write-Log "Installed version unknown. Syncing tracking file to latest ($ver) to prevent false update loops." -Level WARN; Set-AppliedVersion -Version $ver; $appliedVer = $ver }
                 if ($appliedVer -eq $ver) {
                     $state.UpdateAvailable = $false
                     Write-Log "Already up to date." -Level SUCCESS
@@ -1742,23 +1756,12 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     Write-Log "Update available: $ver" -Level WARN
                     Set-StatusLabel "lblUpdateStatus" "UPDATE AVAILABLE" "orange"
                 }
-
                 $proc = Get-RunningServer
-                if ($proc) {
-                    $state.IsRunning = $true
-                    Set-StatusLabel "lblServerStatus" "RUNNING (PID $($proc.Id))" "green"
-                } else {
-                    $state.IsRunning = $false
-                    Set-StatusLabel "lblServerStatus" "STOPPED" "red"
-                }
-
+                if ($proc) { $state.IsRunning = $true; Set-StatusLabel "lblServerStatus" "RUNNING (PID $($proc.Id))" "green" }
+                else { $state.IsRunning = $false; Set-StatusLabel "lblServerStatus" "STOPPED" "red" }
                 Set-StatusLabel "lblLastChecked" (Get-Date -Format "yyyy-MM-dd HH:mm:ss") "gray"
-            } catch {
-                Write-Log "Error checking for updates: $($_.Exception.Message)" -Level ERROR
-            } finally {
-                Set-Progress "reset"
-                Set-Busy $false
-            }
+            } catch { Write-Log "Error checking for updates: $($_.Exception.Message)" -Level ERROR }
+            finally { Set-Progress "reset"; Set-Busy $false }
         }
     })
 
@@ -1770,14 +1773,11 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 $url  = $state.LatestUrl
                 $file = $state.LatestFilename
                 if (-not $url -or -not $file) { Write-Log "No update URL cached." -Level ERROR; return }
-                
                 Write-Log "═══════════════════════════════════════════" -Level HEADER
                 Write-Log "  STARTING UPDATE PROCESS"                  -Level HEADER
                 Write-Log "═══════════════════════════════════════════" -Level HEADER
-
                 Download-AndInstall -Url $url -Filename $file -IsFirstSetup $false
                 Refresh-InstalledLabel
-
                 Write-Log "═══════════════════════════════════════════" -Level HEADER
                 Write-Log "  Update completed successfully!"            -Level SUCCESS
                 Write-Log "═══════════════════════════════════════════" -Level HEADER
@@ -1787,9 +1787,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 Write-Log "Update FAILED: $($_.Exception.Message)" -Level ERROR
                 Set-StatusLabel "lblUpdateStatus" "UPDATE FAILED" "red"
                 Set-Progress "reset"
-            } finally {
-                Set-Busy $false
-            }
+            } finally { Set-Busy $false }
         }
     })
 
@@ -1800,11 +1798,8 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             try {
                 if (-not (Test-ServerInstalled)) { Write-Log "Executable not found." -Level ERROR; return }
                 Start-ServerProcess
-            } catch {
-                Write-Log "Error starting server: $($_.Exception.Message)" -Level ERROR
-            } finally {
-                Set-Busy $false
-            }
+            } catch { Write-Log "Error starting server: $($_.Exception.Message)" -Level ERROR }
+            finally { Set-Busy $false }
         }
     })
 
@@ -1815,11 +1810,8 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
             try {
                 if (-not (Get-RunningServer)) { return }
                 Stop-GameServer
-            } catch {
-                Write-Log "Error stopping server: $($_.Exception.Message)" -Level ERROR
-            } finally {
-                Set-Busy $false
-            }
+            } catch { Write-Log "Error stopping server: $($_.Exception.Message)" -Level ERROR }
+            finally { Set-Busy $false }
         }
     })
 
@@ -1831,12 +1823,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 Write-Log "Refreshing status…" -Level SYSTEM
                 if (Test-ServerInstalled) {
                     $state.IsInstalled = $true
-                    
-                    if (-not (Get-AppliedVersion)) {
-                        $exeVer = Get-InstalledVersion
-                        if ($exeVer) { Set-AppliedVersion -Version $exeVer }
-                    }
-
+                    if (-not (Get-AppliedVersion)) { $exeVer = Get-InstalledVersion; if ($exeVer) { Set-AppliedVersion -Version $exeVer } }
                     Refresh-InstalledLabel
                     Set-StatusLabel "lblSetupStatus" "INSTALLED" "green"
                 } else {
@@ -1844,77 +1831,50 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     Set-StatusLabel "lblInstalled"   "Not installed" "red"
                     Set-StatusLabel "lblSetupStatus" "NOT INSTALLED" "red"
                 }
-
                 $proc = Get-RunningServer
                 if ($proc) {
-                    $state.IsRunning = $true
-                    $state.ExpectedToRun = $true
+                    $state.IsRunning = $true; $state.ExpectedToRun = $true
                     $state.ServerStartTime = $proc.StartTime
                     Set-StatusLabel "lblServerStatus" "RUNNING (PID $($proc.Id))" "green"
                 } else {
                     $state.IsRunning = $false
                     Set-StatusLabel "lblServerStatus" "STOPPED" "red"
                 }
-
                 Set-StatusLabel "lblLastChecked" (Get-Date -Format "yyyy-MM-dd HH:mm:ss") "gray"
                 Write-Log "Status refreshed." -Level SUCCESS
-            } catch {
-                Write-Log "Error refreshing: $($_.Exception.Message)" -Level ERROR
-            } finally {
-                Set-Busy $false
-            }
+            } catch { Write-Log "Error refreshing: $($_.Exception.Message)" -Level ERROR }
+            finally { Set-Busy $false }
         }
     })
 
     $btnBackupNow.Add_Click({
         if ($sharedState.IsBusy -or -not $sharedState.IsInstalled -or $sharedState.IsRunning) { return }
         Start-BackgroundWork -Work {
-            Set-Busy $true
-            Set-Progress "indeterminate"
-            try {
-                Initialize-ServerDirectories
-                Backup-All -IsManual $true
-            } catch {
-                Write-Log "Manual backup failed: $($_.Exception.Message)" -Level ERROR
-            } finally {
-                Set-Progress "reset"
-                Set-Busy $false
-            }
+            Set-Busy $true; Set-Progress "indeterminate"
+            try { Initialize-ServerDirectories; Backup-All -IsManual $true }
+            catch { Write-Log "Manual backup failed: $($_.Exception.Message)" -Level ERROR }
+            finally { Set-Progress "reset"; Set-Busy $false }
         }
     })
 
     $btnRestoreBackup.Add_Click({
         if ($sharedState.IsBusy -or -not $sharedState.IsInstalled -or $sharedState.IsRunning) { return }
-        
         $backupRoot = $sharedState.BackupPath
-        if (-not (Test-Path $backupRoot)) {
-            [System.Windows.MessageBox]::Show("Backup directory does not exist.", "Restore", "OK", "Information")
-            return
-        }
-
+        if (-not (Test-Path $backupRoot)) { [System.Windows.MessageBox]::Show("Backup directory does not exist.", "Restore", "OK", "Information"); return }
         $dlg = New-Object Microsoft.Win32.OpenFileDialog
         $dlg.InitialDirectory = $backupRoot
         $dlg.Filter = "Zip Archives (*.zip)|*.zip"
         $dlg.Title = "Select a backup to restore"
-        
         if ($dlg.ShowDialog() -eq $true) {
             $selectedZip = $dlg.FileName
-            
             $confirm = [System.Windows.MessageBox]::Show("WARNING: This will OVERWRITE all existing configs and worlds with the files from:`n`n$selectedZip`n`nAre you sure?", "Confirm Restore", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
-            
             if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
                 $sharedState.RestoreZipPath = $selectedZip
                 Start-BackgroundWork -Work {
-                    Set-Busy $true
-                    Set-Progress "indeterminate"
-                    try {
-                        Restore-Backup -ZipPath $state.RestoreZipPath
-                    } catch {
-                        Write-Log "Restore failed: $($_.Exception.Message)" -Level ERROR
-                    } finally {
-                        Set-Progress "reset"
-                        Set-Busy $false
-                    }
+                    Set-Busy $true; Set-Progress "indeterminate"
+                    try { Restore-Backup -ZipPath $state.RestoreZipPath }
+                    catch { Write-Log "Restore failed: $($_.Exception.Message)" -Level ERROR }
+                    finally { Set-Progress "reset"; Set-Busy $false }
                 }
             }
         }
@@ -1924,9 +1884,14 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
         param($s, $e)
         if ($sharedState.IsBusy) {
             $msg = [System.Windows.MessageBox]::Show("A background task is currently running. Closing the manager may interrupt it and corrupt files. Are you sure you want to exit?", "Confirm Exit", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
-            if ($msg -ne [System.Windows.MessageBoxResult]::Yes) {
-                $e.Cancel = $true
-            }
+            if ($msg -ne [System.Windows.MessageBoxResult]::Yes) { $e.Cancel = $true; return }
+        }
+        # Try a graceful stdin 'stop' before window closes
+        if ($sharedState.ServerProcess -and -not $sharedState.ServerProcess.HasExited) {
+            try {
+                $sharedState.ServerProcess.StandardInput.WriteLine("stop")
+                $sharedState.ServerProcess.StandardInput.Flush()
+            } catch {}
         }
     })
 
@@ -1943,26 +1908,18 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
         $exe = Join-Path $sharedState.ServerPath $sharedState.ServerExecutable
         if (Test-Path $exe) {
             $sharedState.IsInstalled = $true
-            
             $v = (Get-Item $exe).VersionInfo.ProductVersion
             if (-not $v) { $v = (Get-Item $exe).VersionInfo.FileVersion }
             if (-not $v -or $v.Trim() -eq "") {
                 $appliedVer = Get-AppliedVersion
-                if ($appliedVer) {
-                    $v = $appliedVer
-                } else {
-                    $v = "Unknown"
-                }
+                if ($appliedVer) { $v = $appliedVer } else { $v = "Unknown" }
             } else {
                 $v = $v.Trim()
-                if (-not (Get-AppliedVersion)) {
-                    Set-AppliedVersion -Version $v
-                }
+                if (-not (Get-AppliedVersion)) { Set-AppliedVersion -Version $v }
             }
-            
-            $lblInstalled.Text     = $v
+            $lblInstalled.Text = $v
             $lblInstalled.Foreground = $statusBrushCache["white"]
-            $lblSetupStatus.Text   = "INSTALLED"
+            $lblSetupStatus.Text = "INSTALLED"
             $lblSetupStatus.Foreground = $statusBrushCache["green"]
 
             $exeName = [System.IO.Path]::GetFileNameWithoutExtension($sharedState.ServerExecutable)
@@ -1971,16 +1928,14 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 $sharedState.IsRunning = $true
                 $sharedState.ExpectedToRun = $true
                 $sharedState.ServerStartTime = $proc.StartTime
-                $lblServerStatus.Text      = "RUNNING (PID $($proc.Id))"
+                $lblServerStatus.Text = "RUNNING (PID $($proc.Id) — adopted)"
                 $lblServerStatus.Foreground = $statusBrushCache["green"]
-                
                 $port = "19132"
                 $propsPath = Join-Path $sharedState.ServerPath "server.properties"
                 if (Test-Path $propsPath) {
                     $portLine = Get-Content $propsPath -ErrorAction SilentlyContinue | Where-Object { $_ -match "^server-port=" } | Select-Object -First 1
                     if ($portLine -match "^server-port=(\d+)") { $port = $matches[1] }
                 }
-                
                 $ip = "127.0.0.1"
                 try {
                     $netConfig = Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object {
@@ -1994,13 +1949,12 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                     } | Select-Object -First 1
                     if ($netConfig) { $ip = $netConfig.IPv4Address.IPAddress }
                 } catch { }
-                
                 $lblIpPort.Text = "$($ip):$($port)"
                 $lblIpPort.Foreground = $statusBrushCache["blue"]
-
+                Append-ServerLine "[Detected already-running bedrock_server (PID $($proc.Id)). Stdin wrapper unavailable — stop and start from GUI to enable command input.]" "SYSTEM"
             } else {
                 $sharedState.IsRunning = $false
-                $lblServerStatus.Text      = "STOPPED"
+                $lblServerStatus.Text = "STOPPED"
                 $lblServerStatus.Foreground = $statusBrushCache["red"]
                 $lblIpPort.Text = "—"
                 $lblIpPort.Foreground = $statusBrushCache["gray"]
@@ -2008,11 +1962,11 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
         } else {
             $sharedState.IsInstalled = $false
             $sharedState.IsRunning = $false
-            $lblInstalled.Text     = "Not installed"
+            $lblInstalled.Text = "Not installed"
             $lblInstalled.Foreground = $statusBrushCache["red"]
-            $lblSetupStatus.Text   = "NOT INSTALLED"
+            $lblSetupStatus.Text = "NOT INSTALLED"
             $lblSetupStatus.Foreground = $statusBrushCache["red"]
-            $lblServerStatus.Text  = "N/A"
+            $lblServerStatus.Text = "N/A"
             $lblServerStatus.Foreground = $statusBrushCache["orange"]
             $lblIpPort.Text = "—"
             $lblIpPort.Foreground = $statusBrushCache["gray"]
@@ -2020,24 +1974,18 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
         $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         Append-LogLine "$now [SYSTEM ] ═══════════════════════════════════════════" "SYSTEM"
-        Append-LogLine "$now [SYSTEM ]   Minecraft Bedrock Server Manager v27.4"    "SUCCESS"
+        Append-LogLine "$now [SYSTEM ]   Minecraft Bedrock Server Manager v28.0"    "SUCCESS"
         Append-LogLine "$now [SYSTEM ]   PowerShell $($PSVersionTable.PSVersion)"   "SYSTEM"
         Append-LogLine "$now [SYSTEM ] ═══════════════════════════════════════════" "SYSTEM"
 
         if (-not (Test-Path $exe)) {
-            Append-LogLine "$now [WARN   ] No installation detected — click 'Setup / Install Server' to begin." "WARN"
+            Append-LogLine "$now [WARN   ] No installation detected — click 'Setup / Install' to begin." "WARN"
         } else {
             Append-LogLine "$now [INFO   ] Installation found. Performing initial update check..." "INFO"
-            
             Start-BackgroundWork -Work {
                 Set-Busy $true
-                try {
-                    Periodic-StatusCheck
-                } finally {
-                    Set-Busy $false
-                }
+                try { Periodic-StatusCheck } finally { Set-Busy $false }
             }
-
             if ($sharedState.AutoLaunchOnStart -and -not $sharedState.IsRunning) {
                 Start-Sleep -Seconds 2
                 if (-not $sharedState.IsRunning -and -not $sharedState.IsBusy) {
@@ -2049,7 +1997,6 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 }
             }
         }
-
         Update-ButtonStates
     })
 
@@ -2058,12 +2005,9 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 }) | Out-Null
 
 # ─── Launch GUI ───────────────────────────────────────────────────────────────
- $guiHandle = $guiPowerShell.BeginInvoke()
-
+$guiHandle = $guiPowerShell.BeginInvoke()
 try {
-    while (-not $guiHandle.IsCompleted) {
-        Start-Sleep -Milliseconds 200
-    }
+    while (-not $guiHandle.IsCompleted) { Start-Sleep -Milliseconds 200 }
 } finally {
     $guiPowerShell.EndInvoke($guiHandle)
     $guiPowerShell.Dispose()
