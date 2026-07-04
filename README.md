@@ -20,26 +20,28 @@ It operates using a strict, clean folder hierarchy (defaulting to `C:\Bedrock`):
 
 Running a vanilla Minecraft Bedrock server manually requires constant maintenance. Updates are frequent, and missing one means players on updated clients cannot join. Furthermore, command-line execution lacks native crash monitoring, and backing up world data usually requires writing custom scripts. 
 
-You should use this manager if you want a **"set it and forget it"** solution optimized for long-term stability (weeks or months of uptime). It takes the manual labor out of server hosting by providing an intuitive dashboard that handles backups, crash recovery, and updates automatically, ensuring your server remains online, secure, and up-to-date with zero manual intervention.
+You should use this manager if you want a **"set it and forget it"** solution optimized for long-term stability (weeks or months of uptime). It takes the manual labor out of server hosting by providing an intuitive dashboard that handles backups, crash recovery, updates, and live console interaction automatically, ensuring your server remains online, secure, and up-to-date with zero manual intervention.
 
-## What's New in Version 27.4
+## What's New in Version 28.4
 
-The latest production-ready release introduces deep stability enhancements and system intelligence automation:
-* **Automated Runtime Setup:** Automatically checks your registry for required Microsoft Visual C++ dependencies. If missing, it downloads and performs a silent installation so the server can boot flawlessly.
-* **Intelligent Network Filtering:** The network configuration logic now intelligently filters out virtual adapters (VMware, VirtualBox, and Hyper-V vEthernet switches) to guarantee accurate connection status and static IP mapping.
-* **Persistent Settings (INI Engine):** Your dashboard configurations are now saved permanently to a localized configuration profile (`%APPDATA%`), preserving your preferences between reboots.
-* **Extended Boot-Grace Window:** Added an extended initialization safety buffer (up to 45 seconds) to accommodate slower hard drives and initial Windows Firewall permission checks without flagging a false startup failure.
+The latest production-ready release (Dual Console Edition) introduces deep stability enhancements, a brand new interface, and system intelligence automation:
+* **Dual Console Layout:** Features two distinct log windows. The left tracks Manager/PowerShell system events, while the right displays real-time server output (stdin/stdout) via a custom .NET wrapper.
+* **Live Command Input:** You can now send custom commands directly to the active Minecraft server right from the GUI dashboard!
+* **Advanced Lock Safety & Threading:** Implemented `StdInWriteLock`, `TypeCompileLock`, and synchronized ArrayLists to completely eliminate race conditions across concurrent background tasks.
+* **Smart Process Adoption:** Crash detection and auto-adoption now track by Process ID (PID) and rigorously verify the executable path, preventing the manager from hijacking servers running in other directories.
+* **Graceful Window Closing:** Closing the GUI now intercepts the shutdown and grants the server a 10-second window to safely save worlds and halt before force-killing the process.
+* **True Semantic Versioning:** Automated update checks now utilize full SemVer numeric math for perfectly accurate version comparisons.
 
 ## Features
 
 * **One-Click Setup & Installation:** No need to manually download or extract `.zip` files from the official site. The manager fetches the latest production-ready version directly from Mojang.
 * **Automated Updates:** Continuously polls the Minecraft API for new releases (customizable check intervals). It can notify you of updates or be configured to automatically download, backup, and apply them.
-* **Smart Backups & Restore:** Automatically creates full `.zip` archives of your `worlds` folder and critical configurations (`server.properties`, `allowlist.json`, `permissions.json`) before any update. Includes automated retention policies (e.g., keep the last 3 backups) and a 1-click restore function.
+* **Dual-Console Live Dashboard:** A scrolling, color-coded internal log tracks system statuses and updates, alongside a fully interactive wrapper console for native bedrock server commands.
+* **Smart Backups & Restore:** Automatically creates full `.zip` archives of your `worlds` folder and critical configurations (`server.properties`, `allowlist.json`, `permissions.json`) before any update. Includes automated retention policies and a 1-click restore function.
 * **Active Crash Protection:** Monitors the `bedrock_server.exe` process. If the server crashes or closes unexpectedly, the manager instantly detects the failure and attempts a safe recovery/restart.
-* **Static IP Auto-Configuration:** Automatically detects if your host machine is using a dynamic (DHCP) IP address and can seamlessly elevate privileges to assign a Static IP, preventing player connection issues when your PC reboots.
-* **Live Dashboard & Analytics:** Displays real-time metrics including installed vs. latest versions, PC uptime, Server uptime, active listening IP/Port, and the time of the last successful backup.
-* **Built-in Console Logging:** Features a scrolling, color-coded internal log window to track system events, update statuses, and errors, automatically writing to daily rolling log files.
+* **Static IP & Dependency Auto-Configuration:** Automatically detects DHCP configurations to apply Static IPs, and scans for missing Microsoft Visual C++ redistributables to silently install them.
 * **Low Overhead:** Runs a minimized server process and utilizes highly optimized PowerShell garbage collection to ensure the GUI itself consumes minimal system resources over long uptimes.
+* **Persistent Settings (INI Engine):** Dashboard configurations are saved permanently to a localized configuration profile (`%APPDATA%`), preserving preferences between reboots.
 
 ## Requirements
 
@@ -51,9 +53,8 @@ The latest production-ready release introduces deep stability enhancements and s
 
 Once your Minecraft server has successfully started, follow these quick steps to let others connect:
 
-1. **Open** your server console window.
-2. **Type** the following command exactly as shown:
-   `allowlist off`
+1. **Open** your server console window on the right side of the manager.
+2. **Type** the following command exactly as shown: `allowlist off`
 3. **Press** Enter.
 
 > **Note:** This disables the allowlist, meaning anyone with your server's IP address will now be able to join!
