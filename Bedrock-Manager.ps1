@@ -13,7 +13,7 @@
     Optimized for long-term stability (weeks/months of uptime).
 
 .VERSION
-    28.0
+    28.3
 #>
 
 param(
@@ -43,9 +43,9 @@ function Test-VcRedistInstalled {
     return $false
 }
 
-function Get-DhcpAdapterInfo {
+function Get-ActiveNetworkAdapter {
     try {
-        $netAdapters = Get-NetIPConfiguration | Where-Object {
+        $netAdapters = Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object {
             $_.IPv4Address -ne $null -and
             $_.InterfaceAlias -notmatch "Loopback" -and
             $_.InterfaceAlias -notmatch "VMware" -and
@@ -54,37 +54,52 @@ function Get-DhcpAdapterInfo {
             $_.IPv4Address.IPAddress -notlike "169.*" -and
             $_.IPv4Address.IPAddress -ne "127.0.0.1"
         }
-        foreach ($net in $netAdapters) {
-            $alias = $net.InterfaceAlias
-            $ipAddr = $net.IPv4Address.IPAddress
-            $dhcpStatus = (Get-NetIPInterface -InterfaceAlias $alias -AddressFamily IPv4).Dhcp
-            if ($dhcpStatus -eq 'Enabled') {
-                $prefix = (Get-NetIPAddress -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue).PrefixLength
-                $gateway = (Get-NetRoute -InterfaceAlias $alias -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Select-Object -First 1).NextHop
-                $dns = (Get-DnsClientServerAddress -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
-                return @{ Alias = $alias; Ip = $ipAddr; Prefix = $prefix; Gateway = $gateway; Dns = $dns }
-            }
-        }
+        return ($netAdapters | Select-Object -First 1)
     } catch { }
     return $null
+}
+
+function Get-DhcpAdapterInfo {
+    $net = Get-ActiveNetworkAdapter
+    if (-not $net) { return $null }
+    $alias = $net.interfaceAlias
+    $ipAddr = $net.IPv4Address.IPAddress
+    $dhcpStatus = (Get-NetIPInterface -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp
+    if ($dhcpStatus -eq 'Enabled') {
+        $prefix = (Get-NetIPAddress -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue).PrefixLength
+        $gateway = (Get-NetRoute -InterfaceAlias $alias -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Select-Object -First 1).NextHop
+        $dns = (Get-DnsClientServerAddress -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
+        return @{ Alias = $alias; Ip = $ipAddr; Prefix = $prefix; Gateway = $gateway; Dns = $dns }
+    }
+    return $null
+}
+
+function Set-StaticIpFromDhcp {
+    param([hashtable]$DhcpInfo)
+    try {
+        Set-NetIPInterface -InterfaceAlias $DhcpInfo.Alias -Dhcp Disabled -ErrorAction Stop
+        if ($DhcpInfo.Gateway) {
+            New-NetIPAddress -InterfaceAlias $DhcpInfo.Alias -IPAddress $DhcpInfo.Ip -PrefixLength $DhcpInfo.Prefix -DefaultGateway $DhcpInfo.Gateway -ErrorAction Stop | Out-Null
+        } else {
+            New-NetIPAddress -InterfaceAlias $DhcpInfo.Alias -IPAddress $DhcpInfo.Ip -PrefixLength $DhcpInfo.Prefix -ErrorAction Stop | Out-Null
+        }
+        if ($DhcpInfo.Dns) {
+            Set-DnsClientServerAddress -InterfaceAlias $DhcpInfo.Alias -ServerAddresses $DhcpInfo.Dns -ErrorAction Stop
+        }
+        return $true
+    } catch {
+        return $false
+    }
 }
 
 if ($ApplyStaticIp -and (Test-IsAdmin)) {
     $dhcpInfo = Get-DhcpAdapterInfo
     if ($dhcpInfo) {
-        try {
-            Set-NetIPInterface -InterfaceAlias $dhcpInfo.Alias -Dhcp Disabled -ErrorAction Stop
-            if ($dhcpInfo.Gateway) {
-                New-NetIPAddress -InterfaceAlias $dhcpInfo.Alias -IPAddress $dhcpInfo.Ip -PrefixLength $dhcpInfo.Prefix -DefaultGateway $dhcpInfo.Gateway -ErrorAction Stop | Out-Null
-            } else {
-                New-NetIPAddress -InterfaceAlias $dhcpInfo.Alias -IPAddress $dhcpInfo.Ip -PrefixLength $dhcpInfo.Prefix -ErrorAction Stop | Out-Null
-            }
-            if ($dhcpInfo.Dns) {
-                Set-DnsClientServerAddress -InterfaceAlias $dhcpInfo.Alias -ServerAddresses $dhcpInfo.Dns -ErrorAction Stop
-            }
+        $ok = Set-StaticIpFromDhcp -DhcpInfo $dhcpInfo
+        if ($ok) {
             [System.Windows.Forms.MessageBox]::Show("Static IP configured successfully on adapter '$($dhcpInfo.Alias)'!", "Static IP Applied", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
-        } catch {
-            [System.Windows.Forms.MessageBox]::Show("Failed to set static IP: $($_.Exception.Message)", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+        } else {
+            [System.Windows.Forms.MessageBox]::Show("Failed to set static IP. See event logs for details.", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
         }
     }
 } else {
@@ -135,19 +150,11 @@ if ($ApplyStaticIp -and (Test-IsAdmin)) {
                 $msg = "Your active network adapter '$($dhcpInfo.Alias)' (IP: $($dhcpInfo.Ip)) is using DHCP (dynamic IP).`n`nFor a stable Minecraft server, a static IP is highly recommended so players don't have to update their IP address when your PC restarts.`n`nWould you like to apply a static IP now using your current settings?"
                 $result = [System.Windows.Forms.MessageBox]::Show($msg, "Static IP Recommendation", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
                 if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
-                    try {
-                        Set-NetIPInterface -InterfaceAlias $dhcpInfo.Alias -Dhcp Disabled -ErrorAction Stop
-                        if ($dhcpInfo.Gateway) {
-                            New-NetIPAddress -InterfaceAlias $dhcpInfo.Alias -IPAddress $dhcpInfo.Ip -PrefixLength $dhcpInfo.Prefix -DefaultGateway $dhcpInfo.Gateway -ErrorAction Stop | Out-Null
-                        } else {
-                            New-NetIPAddress -InterfaceAlias $dhcpInfo.Alias -IPAddress $dhcpInfo.Ip -PrefixLength $dhcpInfo.Prefix -ErrorAction Stop | Out-Null
-                        }
-                        if ($dhcpInfo.Dns) {
-                            Set-DnsClientServerAddress -InterfaceAlias $dhcpInfo.Alias -ServerAddresses $dhcpInfo.Dns -ErrorAction Stop
-                        }
+                    $ok = Set-StaticIpFromDhcp -DhcpInfo $dhcpInfo
+                    if ($ok) {
                         [System.Windows.Forms.MessageBox]::Show("Static IP configured successfully!", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
-                    } catch {
-                        [System.Windows.Forms.MessageBox]::Show("Failed to set static IP: $($_.Exception.Message)", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+                    } else {
+                        [System.Windows.Forms.MessageBox]::Show("Failed to set static IP.", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
                     }
                 }
             }
@@ -195,12 +202,14 @@ $script:sharedState = [hashtable]::Synchronized(@{
     StopRequested       = $false
     GuiReady            = $false
     WindowClosed        = $false
-    # NEW: Server console (stdin/stdout wrapper) state
     ServerProcess       = $null
     ServerConsoleMessages = [System.Collections.ArrayList]::new()
     PendingServerCommands = [System.Collections.ArrayList]::new()
     ServerConsoleHistory  = [System.Collections.ArrayList]::new()
     MaxServerConsoleLines = 2000
+    ServerOutputReader  = $null
+    FirewallRuleVerified = $false
+    RestoreZipPath      = $null
 })
 
 $script:sharedState.ServerPath     = Join-Path $script:sharedState.RootPath "Server"
@@ -213,7 +222,7 @@ $xamlString = @"
 <Window
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="Minecraft Bedrock Server Manager v28.0"
+    Title="Minecraft Bedrock Server Manager v28.3"
     Width="1280" Height="780"
     MinWidth="1000" MinHeight="600"
     WindowStartupLocation="CenterScreen"
@@ -333,7 +342,7 @@ $xamlString = @"
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0">
                 <TextBlock Text="Minecraft Bedrock Server Manager" FontSize="18" FontWeight="Bold" Foreground="{StaticResource TextPrimary}"/>
-                <TextBlock Text="v28.0 — Dual Console Edition" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,2,0,0"/>
+                <TextBlock Text="v28.3 — Dual Console Edition" FontSize="10" Foreground="{StaticResource TextMuted}" Margin="0,2,0,0"/>
             </StackPanel>
             <Border Grid.Column="1" Background="{StaticResource BgCard}" BorderBrush="{StaticResource BorderDefault}" BorderThickness="1" CornerRadius="4" Padding="8,5" VerticalAlignment="Center">
                 <StackPanel Orientation="Horizontal">
@@ -519,7 +528,7 @@ $xamlString = @"
                     <Button x:Name="btnBackupNow" Content="💾 Backup Now" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" IsEnabled="False"/>
                     <Button x:Name="btnRestoreBackup" Content="⏪ Restore Backup" Background="{StaticResource AccentGray}" Style="{StaticResource ActionButton}" IsEnabled="False"/>
                 </WrapPanel>
-                <TextBlock Grid.Column="1" x:Name="lblFooter" Text="v28.0" Foreground="{StaticResource TextMuted}" FontSize="10" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                <TextBlock Grid.Column="1" x:Name="lblFooter" Text="v28.3" Foreground="{StaticResource TextMuted}" FontSize="10" VerticalAlignment="Center" Margin="10,0,0,0"/>
             </Grid>
         </Border>
 
@@ -777,7 +786,6 @@ $guiPowerShell.AddScript({
         "gray"   = "#546E7A"
         "white"  = "#212121"
     }
-    # Server console colour map (subtler — Bedrock output)
     $serverColourMap = @{
         "INFO"    = "#DCDCDC"
         "WARN"    = "#FFD27F"
@@ -829,7 +837,6 @@ $guiPowerShell.AddScript({
             $btnBackupNow.IsEnabled     = $canBackupRestore
             $btnRestoreBackup.IsEnabled = $canBackupRestore
         }
-        # The command input is enabled whenever the wrapped server process is alive
         $canSendCmd = $sharedState.IsRunning -and $sharedState.ServerProcess -and -not $sharedState.ServerProcess.HasExited
         $txtServerCommand.IsEnabled = $canSendCmd
         $btnSendCommand.IsEnabled   = $canSendCmd
@@ -876,7 +883,7 @@ $guiPowerShell.AddScript({
             $rtbLog.ScrollToEnd()
         }
 
-        # 1b. Process Pending Server Console Messages
+        # 1b. Process Pending Manager Server Console Messages
         $srvCount = [Math]::Min(100, $sharedState.ServerConsoleMessages.Count)
         if ($srvCount -gt 0) {
             $smsgs = @()
@@ -906,7 +913,54 @@ $guiPowerShell.AddScript({
             $rtbServerLog.ScrollToEnd()
         }
 
-        # 1c. Process Pending Server Commands (typed in GUI)
+        # 1c. Process Native Server Output Queues
+        if ($sharedState.ServerOutputReader) {
+            $hasOutput = $false
+            $queue = $sharedState.ServerOutputReader.OutputQueue
+            $readCount = 0
+            while ($readCount -lt 100) {
+                $line = ""
+                if (-not $queue.TryDequeue([ref]$line)) { break }
+                
+                $level = "INFO"
+                if ($line -match "ERROR|FATAL|crashed") { $level = "ERROR" }
+                elseif ($line -match "WARN|Warning") { $level = "WARN" }
+                elseif ($line -match "Player connected|Player disconnected|Server started|done") { $level = "SUCCESS" }
+                
+                $c = if ($serverBrushCache.ContainsKey($level)) { $serverBrushCache[$level] } else { $serverBrushCache["INFO"] }
+                $para = New-Object System.Windows.Documents.Paragraph
+                $run  = New-Object System.Windows.Documents.Run($line)
+                $run.Foreground = $c
+                $para.Inlines.Add($run)
+                $rtbServerLog.Document.Blocks.Add($para)
+                $readCount++
+                $hasOutput = $true
+            }
+            
+            $errQueue = $sharedState.ServerOutputReader.ErrorQueue
+            while ($true) {
+                $line = ""
+                if (-not $errQueue.TryDequeue([ref]$line)) { break }
+                
+                $para = New-Object System.Windows.Documents.Paragraph
+                $run  = New-Object System.Windows.Documents.Run($line)
+                $run.Foreground = $serverBrushCache["ERROR"]
+                $para.Inlines.Add($run)
+                $rtbServerLog.Document.Blocks.Add($para)
+                $hasOutput = $true
+            }
+
+            if ($hasOutput) {
+                while ($rtbServerLog.Document.Blocks.Count -gt $sharedState.MaxServerConsoleLines) {
+                    $block = $rtbServerLog.Document.Blocks.FirstBlock
+                    $rtbServerLog.Document.Blocks.Remove($block)
+                    if ($block) { $block.Clear() }
+                }
+                $rtbServerLog.ScrollToEnd()
+            }
+        }
+
+        # 1d. Process Pending Server Commands (typed in GUI)
         if ($sharedState.PendingServerCommands.Count -gt 0) {
             $cmds = @()
             [System.Threading.Monitor]::Enter($sharedState.PendingServerCommands.SyncRoot)
@@ -917,10 +971,14 @@ $guiPowerShell.AddScript({
                     try {
                         $sharedState.ServerProcess.StandardInput.WriteLine($c)
                         $sharedState.ServerProcess.StandardInput.Flush()
-                        # Echo into server console panel as a CMD line
                         [System.Threading.Monitor]::Enter($sharedState.ServerConsoleMessages.SyncRoot)
                         try { $sharedState.ServerConsoleMessages.Add(@{ Text = "> $c"; Level = "CMD" }) | Out-Null }
                         finally { [System.Threading.Monitor]::Exit($sharedState.ServerConsoleMessages.SyncRoot) }
+
+                        # Handle 'stop' command to prevent crash protection from triggering
+                        if ($c.Trim().ToLower() -eq "stop") {
+                            $sharedState.ExpectedToRun = $false
+                        }
                     } catch {
                         Append-LogLine "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [ERROR  ] Failed to send command '$c': $($_.Exception.Message)" "ERROR"
                     }
@@ -978,9 +1036,42 @@ $guiPowerShell.AddScript({
                 elseif ($b.Action -eq "free") { $sharedState.IsBusy = $false }
             }
         }
+        
+        # 4b. Check if server process exited and handle cleanup/crash detection
+        if ($sharedState.ServerProcess -and $sharedState.ServerProcess.HasExited -and -not $sharedState.IsBusy) {
+            $code = $sharedState.ServerProcess.ExitCode
+            $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            
+            [System.Threading.Monitor]::Enter($sharedState.ServerConsoleMessages.SyncRoot)
+            try { $sharedState.ServerConsoleMessages.Add(@{ Text = "[Process exited with code $code]"; Level = "SYSTEM" }) | Out-Null }
+            finally { [System.Threading.Monitor]::Exit($sharedState.ServerConsoleMessages.SyncRoot) }
+
+            [System.Threading.Monitor]::Enter($sharedState.PendingMessages.SyncRoot)
+            try { $sharedState.PendingMessages.Add(@{ Text = "$ts [WARN   ] Server process exited with code $code."; Level = "WARN" }) | Out-Null }
+            finally { [System.Threading.Monitor]::Exit($sharedState.PendingMessages.SyncRoot) }
+
+            if (-not $sharedState.ExpectedToRun) {
+                # Graceful exit via 'stop' command or Stop-GameServer
+                $sharedState.ServerProcess = $null
+                $sharedState.ServerOutputReader = $null
+                $sharedState.IsRunning = $false
+                $sharedState.ServerStartTime = $null
+                $lblServerStatus.Text = "STOPPED"
+                $lblServerStatus.Foreground = $statusBrushCache["red"]
+                $lblIpPort.Text = "—"
+                $lblIpPort.Foreground = $statusBrushCache["gray"]
+                Update-ButtonStates
+            } else {
+                # If ExpectedToRun is true, Crash protection will catch it in the next block.
+                # Just clear ServerProcess so we don't loop this message.
+                $sharedState.ServerProcess = $null
+                $sharedState.ServerOutputReader = $null
+            }
+        }
+
         Update-ButtonStates
 
-        # 5. Dashboard Updates (Every 5 seconds / ~17 ticks @ 300ms)
+        # 5. Dashboard Updates (Every ~5 seconds / ~17 ticks @ 300ms)
         $script:tickCount++
         if ($script:tickCount % 17 -eq 0) {
             if ($script:pcBootTime) {
@@ -1010,6 +1101,7 @@ $guiPowerShell.AddScript({
                     $sharedState.IsRunning = $false
                     $sharedState.ServerStartTime = $null
                     $sharedState.ServerProcess = $null
+                    $sharedState.ServerOutputReader = $null
                     $errBrush = $brushCache["ERROR"]
                     $redBrush = $statusBrushCache["red"]
                     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
@@ -1052,7 +1144,7 @@ $guiPowerShell.AddScript({
             $completed = @()
             foreach ($job in $script:activeJobs) {
                 if ($job.Handle.IsCompleted) {
-                    try { $job.PS.EndInvoke($job.Handle) } catch {}
+                    try { $job.PS.EndInvoke($job.Handle) } catch { }
                     $job.PS.Dispose()
                     $job.RS.Close()
                     $job.RS.Dispose()
@@ -1141,14 +1233,16 @@ $guiPowerShell.AddScript({
             [System.Windows.MessageBox]::Show("Server is not running.", "Cannot send command", "OK", "Warning") | Out-Null
             return
         }
-        # Queue the command — the timer tick will write it to StandardInput
         [System.Threading.Monitor]::Enter($sharedState.PendingServerCommands.SyncRoot)
         try { $sharedState.PendingServerCommands.Add($cmd) | Out-Null }
         finally { [System.Threading.Monitor]::Exit($sharedState.PendingServerCommands.SyncRoot) }
 
-        # Track command history (up-arrow recall)
-        $sharedState.ServerConsoleHistory.Add($cmd) | Out-Null
-        $script:commandHistoryIdx = $sharedState.ServerConsoleHistory.Count
+        # Track command history (synchronized)
+        [System.Threading.Monitor]::Enter($sharedState.ServerConsoleHistory.SyncRoot)
+        try {
+            $sharedState.ServerConsoleHistory.Add($cmd) | Out-Null
+            $script:commandHistoryIdx = $sharedState.ServerConsoleHistory.Count
+        } finally { [System.Threading.Monitor]::Exit($sharedState.ServerConsoleHistory.SyncRoot) }
 
         $txtServerCommand.Clear()
     }
@@ -1158,38 +1252,44 @@ $guiPowerShell.AddScript({
             Send-CommandFromTextBox
             $_.Handled = $true
         } elseif ($_.Key -eq [System.Windows.Input.Key]::Up) {
-            if ($sharedState.ServerConsoleHistory.Count -gt 0) {
-                if ($script:commandHistoryIdx -gt 0) { $script:commandHistoryIdx-- }
-                $txtServerCommand.Text = $sharedState.ServerConsoleHistory[$script:commandHistoryIdx]
-                $txtServerCommand.CaretIndex = $txtServerCommand.Text.Length
-            }
+            [System.Threading.Monitor]::Enter($sharedState.ServerConsoleHistory.SyncRoot)
+            try {
+                if ($sharedState.ServerConsoleHistory.Count -gt 0) {
+                    if ($script:commandHistoryIdx -gt 0) { $script:commandHistoryIdx-- }
+                    $txtServerCommand.Text = $sharedState.ServerConsoleHistory[$script:commandHistoryIdx]
+                    $txtServerCommand.CaretIndex = $txtServerCommand.Text.Length
+                }
+            } finally { [System.Threading.Monitor]::Exit($sharedState.ServerConsoleHistory.SyncRoot) }
             $_.Handled = $true
         } elseif ($_.Key -eq [System.Windows.Input.Key]::Down) {
-            if ($sharedState.ServerConsoleHistory.Count -gt 0) {
-                if ($script:commandHistoryIdx -lt ($sharedState.ServerConsoleHistory.Count - 1)) {
-                    $script:commandHistoryIdx++
-                    $txtServerCommand.Text = $sharedState.ServerConsoleHistory[$script:commandHistoryIdx]
-                } else {
-                    $script:commandHistoryIdx = $sharedState.ServerConsoleHistory.Count
-                    $txtServerCommand.Text = ""
+            [System.Threading.Monitor]::Enter($sharedState.ServerConsoleHistory.SyncRoot)
+            try {
+                if ($sharedState.ServerConsoleHistory.Count -gt 0) {
+                    if ($script:commandHistoryIdx -lt ($sharedState.ServerConsoleHistory.Count - 1)) {
+                        $script:commandHistoryIdx++
+                        $txtServerCommand.Text = $sharedState.ServerConsoleHistory[$script:commandHistoryIdx]
+                    } else {
+                        $script:commandHistoryIdx = $sharedState.ServerConsoleHistory.Count
+                        $txtServerCommand.Text = ""
+                    }
+                    $txtServerCommand.CaretIndex = $txtServerCommand.Text.Length
                 }
-                $txtServerCommand.CaretIndex = $txtServerCommand.Text.Length
-            }
+            } finally { [System.Threading.Monitor]::Exit($sharedState.ServerConsoleHistory.SyncRoot) }
             $_.Handled = $true
         }
     })
 
     function Append-LogLine {
-        param([string]$text, [string]$colour)
+        param([string]$text, [string]$Level = "INFO")
         [System.Threading.Monitor]::Enter($sharedState.PendingMessages.SyncRoot)
-        try { $sharedState.PendingMessages.Add(@{ Text = $text; Level = $colour }) | Out-Null }
+        try { $sharedState.PendingMessages.Add(@{ Text = $text; Level = $Level }) | Out-Null }
         finally { [System.Threading.Monitor]::Exit($sharedState.PendingMessages.SyncRoot) }
     }
 
     function Append-ServerLine {
-        param([string]$text, [string]$colour = "INFO")
+        param([string]$text, [string]$Level = "INFO")
         [System.Threading.Monitor]::Enter($sharedState.ServerConsoleMessages.SyncRoot)
-        try { $sharedState.ServerConsoleMessages.Add(@{ Text = $text; Level = $colour }) | Out-Null }
+        try { $sharedState.ServerConsoleMessages.Add(@{ Text = $text; Level = $Level }) | Out-Null }
         finally { [System.Threading.Monitor]::Exit($sharedState.ServerConsoleMessages.SyncRoot) }
     }
 
@@ -1203,6 +1303,32 @@ $guiPowerShell.AddScript({
         $bgPS.Runspace = $bgRS
 
         $helperScript = {
+
+            # ── Compile C# class for process output queue (avoids PS event stalling) ──
+            if (-not ("BedrockProcessReader" -as [type])) {
+                Add-Type -TypeDefinition @"
+                using System;
+                using System.Diagnostics;
+                using System.Collections.Concurrent;
+
+                public class BedrockProcessReader
+                {
+                    public ConcurrentQueue<string> OutputQueue = new ConcurrentQueue<string>();
+                    public ConcurrentQueue<string> ErrorQueue = new ConcurrentQueue<string>();
+                    
+                    public void Attach(Process p)
+                    {
+                        p.OutputDataReceived += (s, e) => {
+                            if (e.Data != null) OutputQueue.Enqueue(e.Data);
+                        };
+                        p.ErrorDataReceived += (s, e) => {
+                            if (e.Data != null) ErrorQueue.Enqueue(e.Data);
+                        };
+                    }
+                }
+"@
+            }
+
             function Write-Log {
                 param([string]$Message, [string]$Level = "INFO")
                 $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -1216,13 +1342,12 @@ $guiPowerShell.AddScript({
                     $logDir  = Split-Path $logPath -Parent
                     if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
                     Add-Content -Path $logPath -Value $entry -ErrorAction SilentlyContinue
-                    Get-ChildItem -Path $logDir -Filter "BedrockServerManager_*.log" -ErrorAction SilentlyContinue | 
-                        Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$state.LogRetentionDays) } | 
+                    Get-ChildItem -Path $logDir -Filter "BedrockServerManager_*.log" -ErrorAction SilentlyContinue |
+                        Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$state.LogRetentionDays) } |
                         Remove-Item -Force -ErrorAction SilentlyContinue
                 } catch { }
             }
 
-            # Push a line into the SERVER console panel
             function Write-ServerConsole {
                 param([string]$Message, [string]$Level = "INFO")
                 [System.Threading.Monitor]::Enter($state.ServerConsoleMessages.SyncRoot)
@@ -1250,17 +1375,29 @@ $guiPowerShell.AddScript({
                 $state.PendingProgress = @{ Type = $Type; Value = $Value }
             }
 
+            function Ensure-FirewallRule {
+                param([string]$ExePath)
+                if ($state.FirewallRuleVerified) { return }
+                try {
+                    $ruleName = "Minecraft Bedrock Server"
+                    $existingRule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+                    if (-not $existingRule) {
+                        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Program $ExePath -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+                    }
+                } catch { }
+                $state.FirewallRuleVerified = $true
+            }
+
             function Get-RunningServer {
                 $exeName = [System.IO.Path]::GetFileNameWithoutExtension($state.ServerExecutable)
                 $exePath = Join-Path $state.ServerPath $state.ServerExecutable
-                # If we own the wrapped process, prefer it
                 if ($state.ServerProcess -and -not $state.ServerProcess.HasExited) { return $state.ServerProcess }
                 $procs = Get-Process -Name $exeName -ErrorAction SilentlyContinue
                 if (-not $procs) { return $null }
                 $procList = @($procs)
                 if ($procList.Count -eq 1) { return $procList[0] }
                 foreach ($p in $procList) {
-                    try { if ($p.Path -and ($p.Path -eq $exePath)) { return $p } } catch {}
+                    try { if ($p.Path -and ($p.Path -eq $exePath)) { return $p } } catch { }
                 }
                 return $null
             }
@@ -1275,7 +1412,7 @@ $guiPowerShell.AddScript({
                 $exe = Join-Path $state.ServerPath $state.ServerExecutable
                 if (Test-Path $exe) {
                     $vi = (Get-Item $exe).VersionInfo
-                    $v = $vi.ProductVersion; if (-not $v) { $v = $vi.FileVersion } 
+                    $v = $vi.ProductVersion; if (-not $v) { $v = $vi.FileVersion }
                     if ($v -and $v.Trim() -ne "") { return $v.Trim() }
                     $appliedVer = Get-AppliedVersion; if ($appliedVer) { return $appliedVer }
                 }
@@ -1304,13 +1441,10 @@ $guiPowerShell.AddScript({
                 Write-Log "Stopping server (PID $($proc.Id))..." -Level WARN
                 Set-StatusLabel "lblServerStatus" "STOPPING…" "orange"
 
-                # NEW: Try graceful stop via stdin first (since we own the StandardInput wrapper)
-                $stdinStopSent = $false
                 if ($state.ServerProcess -and -not $state.ServerProcess.HasExited) {
                     try {
                         $state.ServerProcess.StandardInput.WriteLine("stop")
                         $state.ServerProcess.StandardInput.Flush()
-                        $stdinStopSent = $true
                         Write-ServerConsole "> stop" "CMD"
                         Write-Log "Sent 'stop' command via stdin (graceful shutdown)." -Level SYSTEM
                     } catch {
@@ -1327,11 +1461,15 @@ $guiPowerShell.AddScript({
                     Get-RunningServer | Stop-Process -Force
                     Start-Sleep -Seconds 2
                 }
-                # Dispose the wrapped process object
+
                 if ($state.ServerProcess) {
-                    try { $state.ServerProcess.Dispose() } catch {}
+                    try { $state.ServerProcess.Dispose() } catch { }
                     $state.ServerProcess = $null
                 }
+                if ($state.ServerOutputReader) {
+                    $state.ServerOutputReader = $null
+                }
+
                 $state.IsRunning = $false
                 $state.ExpectedToRun = $false
                 $state.ServerStartTime = $null
@@ -1406,16 +1544,21 @@ $guiPowerShell.AddScript({
             }
             function Extract-VersionFromFilename { param([string]$Filename); if ($Filename -match "bedrock-server-(.+?)\.zip") { return $matches[1] }; return $Filename }
 
-            function Get-ServerConnectionInfo {
+            function Get-ServerPort {
                 $port = "19132"
                 $propsPath = Join-Path $state.ServerPath "server.properties"
                 if (Test-Path $propsPath) {
                     $portLine = Get-Content $propsPath -ErrorAction SilentlyContinue | Where-Object { $_ -match "^server-port=" } | Select-Object -First 1
                     if ($portLine -match "^server-port=(\d+)") { $port = $matches[1] }
                 }
+                return $port
+            }
+
+            function Get-ServerConnectionInfo {
+                $port = Get-ServerPort
                 $ip = "127.0.0.1"
                 try {
-                    $netConfig = Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object {
+                    $netAdapters = Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object {
                         $_.IPv4Address -ne $null -and
                         $_.InterfaceAlias -notmatch "Loopback" -and
                         $_.InterfaceAlias -notmatch "VMware" -and
@@ -1424,23 +1567,22 @@ $guiPowerShell.AddScript({
                         $_.IPv4Address.IPAddress -notlike "169.*" -and
                         $_.IPv4Address.IPAddress -ne "127.0.0.1"
                     } | Select-Object -First 1
-                    if ($netConfig) { $ip = $netConfig.IPv4Address.IPAddress }
+                    if ($netAdapters) { $ip = $netAdapters.IPv4Address.IPAddress }
                 } catch { }
                 $hostname = [System.Net.Dns]::GetHostName()
                 return @{ Hostname = $hostname; IpPort = "$($ip):$($port)" }
             }
 
-            # ─── Start-ServerProcess — uses .NET stdin/stdout wrapper ──────────
             function Start-ServerProcess {
                 $exe = Join-Path $state.ServerPath $state.ServerExecutable
                 if (-not (Test-Path $exe)) { Write-Log "Executable not found at $exe" -Level ERROR; return }
 
-                # 1. Adopt already-running process if present (we will NOT have stdin control in that case)
+                # 1. Adopt already-running process if present (we will NOT have stdin control)
                 $existingProc = Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($state.ServerExecutable)) -ErrorAction SilentlyContinue | Select-Object -First 1
                 if ($existingProc -and (-not $state.ServerProcess -or $state.ServerProcess.HasExited)) {
                     $state.IsRunning = $true
                     $state.ExpectedToRun = $true
-                    $state.ServerProcess = $null  # we don't own stdin
+                    $state.ServerProcess = $null
                     $state.ServerStartTime = $existingProc.StartTime
                     Set-StatusLabel "lblServerStatus" "RUNNING (PID $($existingProc.Id) — adopted, no stdin)" "green"
                     $connStr = Get-ServerConnectionInfo
@@ -1455,15 +1597,8 @@ $guiPowerShell.AddScript({
                     return
                 }
 
-                # 2. Firewall rule
-                try {
-                    $ruleName = "Minecraft Bedrock Server"
-                    $existingRule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
-                    if (-not $existingRule) {
-                        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Program $exe -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
-                        Write-Log "Created Windows Firewall rule to allow inbound traffic." -Level SYSTEM
-                    }
-                } catch { Write-Log "Could not automatically create firewall rule. Windows may prompt you to allow network access." -Level WARN }
+                # 2. Firewall rule — silent one-time check (never logged)
+                Ensure-FirewallRule -ExePath $exe
 
                 Write-Log "Starting server with stdin/stdout wrapper…" -Level SYSTEM
                 Set-StatusLabel "lblServerStatus" "STARTING…" "orange"
@@ -1478,51 +1613,17 @@ $guiPowerShell.AddScript({
                 $startInfo.RedirectStandardError  = $true
                 $startInfo.CreateNoWindow         = $true
                 $startInfo.WindowStyle            = [System.Diagnostics.ProcessWindowStyle]::Hidden
-                # Bedrock server writes UTF-8; force the readers to decode as UTF-8
                 $startInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8
                 $startInfo.StandardErrorEncoding  = [System.Text.Encoding]::UTF8
 
                 $proc = New-Object System.Diagnostics.Process
                 $proc.StartInfo = $startInfo
                 $proc.EnableRaisingEvents = $true
-                $proc.SynchronizingObject = $null
 
-                # 4. Wire up async stdout / stderr handlers
-                # Each event fires on a thread-pool thread; we just push to the synchronized queue.
-                $outAction = {
-                    param($sender, $e)
-                    if ($e.Data -ne $null) {
-                        $line = $e.Data
-                        $level = "INFO"
-                        # Heuristic colour mapping for Bedrock output
-                        if ($line -match "ERROR|FATAL|crashed") { $level = "ERROR" }
-                        elseif ($line -match "WARN|Warning") { $level = "WARN" }
-                        elseif ($line -match "Player connected|Player disconnected|Server started|done") { $level = "SUCCESS" }
-                        [System.Threading.Monitor]::Enter($state.ServerConsoleMessages.SyncRoot)
-                        try { $state.ServerConsoleMessages.Add(@{ Text = $line; Level = $level }) | Out-Null }
-                        finally { [System.Threading.Monitor]::Exit($state.ServerConsoleMessages.SyncRoot) }
-                    }
-                }
-                $errAction = {
-                    param($sender, $e)
-                    if ($e.Data -ne $null) {
-                        [System.Threading.Monitor]::Enter($state.ServerConsoleMessages.SyncRoot)
-                        try { $state.ServerConsoleMessages.Add(@{ Text = $e.Data; Level = "ERROR" }) | Out-Null }
-                        finally { [System.Threading.Monitor]::Exit($state.ServerConsoleMessages.SyncRoot) }
-                    }
-                }
-                $exitedAction = {
-                    try {
-                        if ($state.ServerProcess) {
-                            $code = $state.ServerProcess.ExitCode
-                            Write-ServerConsole "[Process exited with code $code]" "SYSTEM"
-                            Write-Log "Server process exited with code $code." -Level WARN
-                        }
-                    } catch {}
-                }
-                Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action $outAction | Out-Null
-                Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived  -Action $errAction | Out-Null
-                Register-ObjectEvent -InputObject $proc -EventName Exited             -Action $exitedAction | Out-Null
+                # 4. Wire up native stdout / stderr handlers via C# ConcurrentQueue
+                $reader = New-Object BedrockProcessReader
+                $reader.Attach($proc)
+                $state.ServerOutputReader = $reader
 
                 try {
                     $started = $proc.Start()
@@ -1537,7 +1638,6 @@ $guiPowerShell.AddScript({
                     return
                 }
 
-                # Begin async reads
                 $proc.BeginOutputReadLine()
                 $proc.BeginErrorReadLine()
 
@@ -1570,8 +1670,9 @@ $guiPowerShell.AddScript({
                 } else {
                     $state.IsRunning = $false
                     $state.ExpectedToRun = $false
-                    try { if ($proc) { $proc.Dispose() } } catch {}
+                    try { if ($proc) { $proc.Dispose() } } catch { }
                     $state.ServerProcess = $null
+                    $state.ServerOutputReader = $null
                     Set-StatusLabel "lblServerStatus" "START FAILED" "red"
                     Write-Log "Server process exited or did not respond in time. Check server console panel for errors." -Level ERROR
                 }
@@ -1628,7 +1729,6 @@ $guiPowerShell.AddScript({
                 $state.UpdateAvailable = $false
                 if ($state.StartAfterUpdate) { Start-ServerProcess }
                 else { Set-StatusLabel "lblServerStatus" "STOPPED" "red" }
-                Set-StatusLabel "lblLastChecked" (Get-Date -Format "yyyy-MM-dd HH:mm:ss") "gray"
                 Set-Progress "value" 100
                 [System.GC]::Collect()
             }
@@ -1645,7 +1745,6 @@ $guiPowerShell.AddScript({
                     $state.IsInstalled = $false
                     Set-StatusLabel "lblInstalled"   "Not installed" "red"
                     Set-StatusLabel "lblSetupStatus" "NOT INSTALLED" "red"
-                    Set-StatusLabel "lblLastChecked" (Get-Date -Format "yyyy-MM-dd HH:mm:ss") "gray"
                     return
                 }
                 $proc = Get-RunningServer
@@ -1688,7 +1787,6 @@ $guiPowerShell.AddScript({
                         }
                     }
                 } catch { Write-Log "Periodic update check failed: $($_.Exception.Message)" -Level WARN }
-                Set-StatusLabel "lblLastChecked" (Get-Date -Format "yyyy-MM-dd HH:mm:ss") "gray"
                 Write-Log "── Periodic check done ──" -Level PERIODIC
             }
         }
@@ -1759,7 +1857,6 @@ $guiPowerShell.AddScript({
                 $proc = Get-RunningServer
                 if ($proc) { $state.IsRunning = $true; Set-StatusLabel "lblServerStatus" "RUNNING (PID $($proc.Id))" "green" }
                 else { $state.IsRunning = $false; Set-StatusLabel "lblServerStatus" "STOPPED" "red" }
-                Set-StatusLabel "lblLastChecked" (Get-Date -Format "yyyy-MM-dd HH:mm:ss") "gray"
             } catch { Write-Log "Error checking for updates: $($_.Exception.Message)" -Level ERROR }
             finally { Set-Progress "reset"; Set-Busy $false }
         }
@@ -1840,7 +1937,6 @@ $guiPowerShell.AddScript({
                     $state.IsRunning = $false
                     Set-StatusLabel "lblServerStatus" "STOPPED" "red"
                 }
-                Set-StatusLabel "lblLastChecked" (Get-Date -Format "yyyy-MM-dd HH:mm:ss") "gray"
                 Write-Log "Status refreshed." -Level SUCCESS
             } catch { Write-Log "Error refreshing: $($_.Exception.Message)" -Level ERROR }
             finally { Set-Busy $false }
@@ -1891,7 +1987,7 @@ $guiPowerShell.AddScript({
             try {
                 $sharedState.ServerProcess.StandardInput.WriteLine("stop")
                 $sharedState.ServerProcess.StandardInput.Flush()
-            } catch {}
+            } catch { }
         }
     })
 
@@ -1938,7 +2034,7 @@ $guiPowerShell.AddScript({
                 }
                 $ip = "127.0.0.1"
                 try {
-                    $netConfig = Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object {
+                    $netAdapters = Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object {
                         $_.IPv4Address -ne $null -and
                         $_.InterfaceAlias -notmatch "Loopback" -and
                         $_.InterfaceAlias -notmatch "VMware" -and
@@ -1947,7 +2043,7 @@ $guiPowerShell.AddScript({
                         $_.IPv4Address.IPAddress -notlike "169.*" -and
                         $_.IPv4Address.IPAddress -ne "127.0.0.1"
                     } | Select-Object -First 1
-                    if ($netConfig) { $ip = $netConfig.IPv4Address.IPAddress }
+                    if ($netAdapters) { $ip = $netAdapters.IPv4Address.IPAddress }
                 } catch { }
                 $lblIpPort.Text = "$($ip):$($port)"
                 $lblIpPort.Foreground = $statusBrushCache["blue"]
@@ -1974,7 +2070,7 @@ $guiPowerShell.AddScript({
 
         $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         Append-LogLine "$now [SYSTEM ] ═══════════════════════════════════════════" "SYSTEM"
-        Append-LogLine "$now [SYSTEM ]   Minecraft Bedrock Server Manager v28.0"    "SUCCESS"
+        Append-LogLine "$now [SYSTEM ]   Minecraft Bedrock Server Manager v28.3"    "SUCCESS"
         Append-LogLine "$now [SYSTEM ]   PowerShell $($PSVersionTable.PSVersion)"   "SYSTEM"
         Append-LogLine "$now [SYSTEM ] ═══════════════════════════════════════════" "SYSTEM"
 
