@@ -13,37 +13,8 @@
     Optimized for long-term stability (weeks/months of uptime).
 
 .VERSION
-    28.4
+    28.4.1
 
-.CHANGES from 28.3
-    - Fixed: ContentRendered called Get-AppliedVersion/Set-AppliedVersion which
-      were only defined in the background helper runspace, causing silent
-      CommandNotFoundException errors on startup. Replaced with inline file ops.
-    - Fixed: Auto-launch race condition + UI freeze. ContentRendered no longer
-      Start-Sleeps on the GUI thread; periodic check and auto-launch are chained
-      in the same background work block.
-    - Fixed: Process adoption verified exe Path matches our installation,
-      preventing adoption of bedrock_server instances from other directories.
-    - Fixed: StandardInput writes now guarded by a shared lock
-      (StdInWriteLock) to prevent concurrent stream writes from tick handler,
-      Stop-GameServer, and window closing handler.
-    - Fixed: BedrockProcessReader C# type compilation guarded by TypeCompileLock
-      to prevent race across concurrent background runspaces.
-    - Fixed: Window closing now waits up to 10s for graceful 'stop', then
-      force-kills if needed. Prevents world corruption on close.
-    - Fixed: Background jobs cleaned up on window close (stop + dispose
-      runspaces).
-    - Fixed: Version comparison now uses proper semver numeric comparison
-      (Compare-BedrockVersion) instead of string equality.
-    - Fixed: try/catch around Process.StartTime access (can throw
-      Win32Exception for elevated processes).
-    - Fixed: Firewall rule verified for adopted processes.
-    - Fixed: ArrayLists in sharedState now use [ArrayList]::Synchronized().
-    - Fixed: Backup zip overwrite safety (delete existing before create).
-    - Fixed: Crash detection checks process by PID when available, not just name.
-    - Fixed: DispatcherTimer guarded against tick after window closed.
-    - Added: Path validation on root path change.
-    - Added: PendingProgress read as single atomic snapshot in tick handler.
 #>
 
 param(
@@ -188,6 +159,31 @@ if ($ApplyStaticIp -and (Test-IsAdmin)) {
                     }
                 }
             }
+            
+            # Apply / repair firewall rule for the Bedrock server (now that we are admin)
+            $rootPathToCheck = if ([string]::IsNullOrWhiteSpace($RootPath)) { "C:\Bedrock" } else { $RootPath }
+            $serverExePath = Join-Path $rootPathToCheck "Server\bedrock_server.exe"
+            if (Test-Path $serverExePath) {
+                try {
+                    $ruleName = "Minecraft Bedrock Server"
+                    $existingRule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+                    if (-not $existingRule) {
+                        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Program $serverExePath -Action Allow -Profile Any -ErrorAction Stop | Out-Null
+                    } else {
+                        $appFilter = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $existingRule -ErrorAction SilentlyContinue
+                        if ($appFilter -and $appFilter.Program -and ($appFilter.Program -ne $serverExePath)) {
+                            Set-NetFirewallRule -DisplayName $ruleName -Program $serverExePath -ErrorAction Stop
+                        }
+                    }
+                } catch {
+                    [System.Windows.Forms.MessageBox]::Show(
+                        "Failed to apply firewall rule:`n`n$($_.Exception.Message)",
+                        "Firewall Warning",
+                        [System.Windows.Forms.MessageBoxButtons]::OK,
+                        [System.Windows.Forms.MessageBoxIcon]::Warning
+                    )
+                }
+            }
         }
     }
 }
@@ -200,7 +196,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # ─── Shared State ─────────────────────────────────────────────────────────────
-$script:sharedState = [hashtable]::Synchronized(@{
+ $script:sharedState = [hashtable]::Synchronized(@{
     RootPath            = if ($RootPath -ne "") { $RootPath } else { "C:\Bedrock" }
     ApiUrl              = "https://net-secondary.web.minecraft-services.net/api/v1.0/download/links"
     ServerExecutable    = "bedrock_server.exe"
@@ -246,13 +242,13 @@ $script:sharedState = [hashtable]::Synchronized(@{
     PendingProgress     = @{ Type = "none"; Value = 0 }
 })
 
-$script:sharedState.ServerPath     = Join-Path $script:sharedState.RootPath "Server"
-$script:sharedState.BackupPath     = Join-Path $script:sharedState.RootPath "Backups"
-$script:sharedState.LogsPath       = Join-Path $script:sharedState.RootPath "Logs"
-$script:sharedState.UpdateTempPath = Join-Path $script:sharedState.RootPath "UpdateTemp"
+ $script:sharedState.ServerPath     = Join-Path $script:sharedState.RootPath "Server"
+ $script:sharedState.BackupPath     = Join-Path $script:sharedState.RootPath "Backups"
+ $script:sharedState.LogsPath       = Join-Path $script:sharedState.RootPath "Logs"
+ $script:sharedState.UpdateTempPath = Join-Path $script:sharedState.RootPath "UpdateTemp"
 
 # ─── XAML ─────────────────────────────────────────────────────────────────────
-$xamlString = @"
+ $xamlString = @"
 <Window
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -660,17 +656,17 @@ $xamlString = @"
 "@
 
 # ─── GUI Runspace ─────────────────────────────────────────────────────────────
-$guiRunspace = [RunspaceFactory]::CreateRunspace()
-$guiRunspace.ApartmentState = "STA"
-$guiRunspace.ThreadOptions  = "ReuseThread"
-$guiRunspace.Open()
-$guiRunspace.SessionStateProxy.SetVariable("sharedState", $script:sharedState)
-$guiRunspace.SessionStateProxy.SetVariable("xamlString",  $xamlString)
+ $guiRunspace = [RunspaceFactory]::CreateRunspace()
+ $guiRunspace.ApartmentState = "STA"
+ $guiRunspace.ThreadOptions  = "ReuseThread"
+ $guiRunspace.Open()
+ $guiRunspace.SessionStateProxy.SetVariable("sharedState", $script:sharedState)
+ $guiRunspace.SessionStateProxy.SetVariable("xamlString",  $xamlString)
 
-$guiPowerShell = [PowerShell]::Create()
-$guiPowerShell.Runspace = $guiRunspace
+ $guiPowerShell = [PowerShell]::Create()
+ $guiPowerShell.Runspace = $guiRunspace
 
-$guiPowerShell.AddScript({
+ $guiPowerShell.AddScript({
 
     Add-Type -AssemblyName PresentationFramework
     Add-Type -AssemblyName PresentationCore
@@ -1488,11 +1484,31 @@ $guiPowerShell.AddScript({
                 try {
                     $ruleName = "Minecraft Bedrock Server"
                     $existingRule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+
                     if (-not $existingRule) {
-                        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Program $ExePath -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+                        # Create the rule — let errors throw so we can log them
+                        New-NetFirewallRule -DisplayName $ruleName `
+                                            -Direction Inbound `
+                                            -Program $ExePath `
+                                            -Action Allow `
+                                            -Profile Any `
+                                            -ErrorAction Stop | Out-Null
+                        Write-Log "Firewall rule '$ruleName' created for: $ExePath" -Level SYSTEM
+                    } else {
+                        # Rule exists — verify its Program path matches; update if stale
+                        $appFilter = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $existingRule -ErrorAction SilentlyContinue
+                        $currentProgram = $appFilter.Program
+                        if ($currentProgram -and ($currentProgram -ne $ExePath)) {
+                            Set-NetFirewallRule -DisplayName $ruleName -Program $ExePath -ErrorAction Stop
+                            Write-Log "Firewall rule '$ruleName' updated to point to: $ExePath (was: $currentProgram)" -Level SYSTEM
+                        }
                     }
-                } catch { }
-                $state.FirewallRuleVerified = $true
+                    # Only mark verified on success
+                    $state.FirewallRuleVerified = $true
+                } catch {
+                    Write-Log "Failed to apply firewall rule: $($_.Exception.Message)" -Level ERROR
+                    # Intentionally do NOT set FirewallRuleVerified — allow retry on next call
+                }
             }
 
             function Get-RunningServer {
@@ -1865,6 +1881,7 @@ $guiPowerShell.AddScript({
                 $extractedExe = Join-Path $state.ServerPath $state.ServerExecutable
                 if (-not (Test-Path $extractedExe)) { throw "Extraction verification failed: $state.ServerExecutable not found." }
                 Write-Log "Extraction complete & verified." -Level SUCCESS
+                Ensure-FirewallRule -ExePath $extractedExe
                 Set-Progress "value" 80
                 Write-Log "Configs and Worlds preserved via archive backup." -Level SYSTEM
                 Set-Progress "value" 90
@@ -2220,10 +2237,20 @@ $guiPowerShell.AddScript({
                     $ruleName = "Minecraft Bedrock Server"
                     $existingRule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
                     if (-not $existingRule) {
-                        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Program $exe -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+                        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Program $exe -Action Allow -Profile Any -ErrorAction Stop | Out-Null
+                    } else {
+                        $appFilter = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $existingRule -ErrorAction SilentlyContinue
+                        if ($appFilter -and $appFilter.Program -and ($appFilter.Program -ne $exe)) {
+                            Set-NetFirewallRule -DisplayName $ruleName -Program $exe -ErrorAction Stop
+                        }
                     }
                     $sharedState.FirewallRuleVerified = $true
-                } catch { }
+                } catch {
+                    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                    [System.Threading.Monitor]::Enter($sharedState.PendingMessages.SyncRoot)
+                    try { $sharedState.PendingMessages.Add(@{ Text = "$ts [ERROR  ] Failed to apply firewall rule: $($_.Exception.Message)"; Level = "ERROR" }) | Out-Null }
+                    finally { [System.Threading.Monitor]::Exit($sharedState.PendingMessages.SyncRoot) }
+                }
 
                 $sharedState.IsRunning = $true
                 $sharedState.ExpectedToRun = $true
@@ -2307,7 +2334,7 @@ $guiPowerShell.AddScript({
 }) | Out-Null
 
 # ─── Launch GUI ───────────────────────────────────────────────────────────────
-$guiHandle = $guiPowerShell.BeginInvoke()
+ $guiHandle = $guiPowerShell.BeginInvoke()
 try {
     while (-not $guiHandle.IsCompleted) { Start-Sleep -Milliseconds 200 }
 } finally {
