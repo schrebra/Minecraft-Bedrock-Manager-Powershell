@@ -15,6 +15,7 @@ It operates using a strict, clean folder hierarchy (defaulting to `C:\Bedrock`):
 * `\Backups` - Compressed `.zip` archives of your worlds and configurations.
 * `\Logs` - Daily rolling manager logs.
 * `\UpdateTemp` - Temporary staging for safe updates.
+* `\Config` - Settings are stored in a configuration ini file
 
 ## Why You Should Use It
 
@@ -41,7 +42,7 @@ The latest production-ready release (Dual Console Edition) introduces deep stabi
 * **Active Crash Protection:** Monitors the `bedrock_server.exe` process. If the server crashes or closes unexpectedly, the manager instantly detects the failure and attempts a safe recovery/restart.
 * **Static IP & Dependency Auto-Configuration:** Automatically detects DHCP configurations to apply Static IPs, and scans for missing Microsoft Visual C++ redistributables to silently install them.
 * **Low Overhead:** Runs a minimized server process and utilizes highly optimized PowerShell garbage collection to ensure the GUI itself consumes minimal system resources over long uptimes.
-* **Persistent Settings (INI Engine):** Dashboard configurations are saved permanently to a localized configuration profile (`%APPDATA%`), preserving preferences between reboots.
+* **Persistent Settings (INI Engine):** Dashboard configurations are saved permanently to a localized configuration profile (`C:\Bedrock\Config\config.ini`), preserving preferences between reboots.
 
 ## Requirements
 
