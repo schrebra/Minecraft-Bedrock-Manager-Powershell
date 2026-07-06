@@ -50,7 +50,7 @@ You should use this manager if you want a "set it and forget it" solution optimi
 * **Automated Backup Retention:** Automatically purges the oldest backups when the maximum backup limit is reached (customizable, defaults to 3).
 
 ### 🖥️ Interface & Dashboard
-* **Native WPF/XAML GUI:** A modern, dark-mode-friendly dashboard that scales to maximize screen real estate.
+* **Native WPF/XAML GUI:** A modern dashboard that scales to maximize screen real estate.
 * **Dual-Console Layout:** Splits logs into two panels:
   * **Left Console:** Tracks manager-side events (system logs, updates, crashes, settings applied).
   * **Right Console:** Real-time wrapper for native `bedrock_server.exe` stdout/stderr output.
