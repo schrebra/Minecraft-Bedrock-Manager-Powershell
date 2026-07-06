@@ -1,14 +1,14 @@
 # Minecraft Bedrock Server Manager
 
 ## What It Is
-The **Minecraft Bedrock Server Manager** is a standalone, lightweight PowerShell script that deploys a native WPF/XAML graphical user interface (GUI) to manage a Minecraft Bedrock Dedicated Server on Windows. It requires zero third-party dependencies or installations—just standard Windows PowerShell 5.1. 
+The **Minecraft Bedrock Server Manager** is a standalone, lightweight PowerShell script that deploys a native WPF/XAML graphical user interface (GUI) to manage a Minecraft Bedrock Dedicated Server on Windows. It requires zero third party dependencies or installations just standard Windows PowerShell 5.1. 
 
 <img width="60%" alt="2026-07-05_164913" src="https://github.com/user-attachments/assets/d8be13de-2960-40ca-ae21-2755145ebd61" />
 
 ---
 
 ## What It Does
-This tool automates the entire lifecycle of running a Windows Bedrock server. From the initial click, it reaches out to the official Mojang/Minecraft API, downloads the latest dedicated server files, and configures a clean local directory structure. Once running, it monitors the server process, handles graceful shutdowns, tracks PC and server uptime, and provides a real-time console log of system events.
+This tool automates the entire lifecycle of running a Windows Bedrock server. From the initial click, it reaches out to the official Mojang/Minecraft API, downloads the latest dedicated server files, and configures a clean local directory structure. Once running, it monitors the server process, handles graceful shutdowns, tracks PC and server uptime, and provides a real time console log of system events.
 
 It operates using a strict, clean folder hierarchy (defaulting to `C:\Bedrock`):
 
@@ -21,14 +21,14 @@ It operates using a strict, clean folder hierarchy (defaulting to `C:\Bedrock`):
 ## Why You Should Use It
 Running a vanilla Minecraft Bedrock server manually requires constant maintenance. Updates are frequent, and missing one means players on updated clients cannot join. Furthermore, command-line execution lacks native crash monitoring, and backing up world data usually requires writing custom scripts. 
 
-You should use this manager if you want a "set it and forget it" solution optimized for long-term stability (weeks or months of uptime). It takes the manual labor out of server hosting by providing an intuitive dashboard that handles backups, crash recovery, updates, and live console interaction automatically, ensuring your server remains online, secure, and up-to-date with zero manual intervention.
+You should use this manager if you want a "set it and forget it" solution optimized for long term stability (weeks or months of uptime). It takes the manual labor out of server hosting by providing an intuitive dashboard that handles backups, crash recovery, updates, and live console interaction automatically, ensuring your server remains online, secure, and up-to-date with zero manual intervention.
 
 ---
 
 ## Features
 
 ### 🚀 Installation & Setup
-* **Zero-Dependency Execution:** Runs entirely natively on Windows 10/11/Server using only built-in PowerShell 5.1 and WPF/XAML (no Python, Node.js, or external libraries required).
+* **Zero-Dependency Execution:** Runs entirely natively on Windows 10/11/Server using only built in PowerShell 5.1 and WPF/XAML (no Python, Node.js, or external libraries required).
 * **One-Click Setup:** Automatically reaches out to the official Mojang/Minecraft API, downloads the latest Bedrock server `.zip`, and extracts it.
 * **Clean Folder Hierarchy:** Automatically creates and manages a structured directory tree (`\Server`, `\Backups`, `\Logs`, `\UpdateTemp`, `\Config`) defaulting to `C:\Bedrock`.
 * **Auto-Firewall Configuration:** Automatically creates and manages inbound Windows Firewall rules for `bedrock_server.exe` (requires Admin rights).
@@ -59,7 +59,7 @@ You should use this manager if you want a "set it and forget it" solution optimi
 * **Live Status Tracking:** Constantly displays PC Uptime, Server Uptime, Installed Version, Latest Version, Server Status, IP/Port, and the time of the last backup.
 * **Color-Coded Logging:** System and Server logs utilize a dynamic color map (e.g., Green for Success, Red for Error, Orange for Warning) for easy visual parsing.
 * **Daily Console Auto-Clear:** Automatically clears the GUI server console panel every 24 hours to prevent high memory usage and UI lag.
-* **Active Progress Bars:** Displays an indeterminate or percentage-based progress bar during downloads, extractions, and backups.
+* **Active Progress Bars:** Displays an indeterminate or percentage based progress bar during downloads, extractions, and backups.
 
 ### ⏱️ Scheduled Reboots
 * **Custom Scheduling Engine:** Allows users to configure automatic server restarts on a Daily, Weekly, Biweekly, or Monthly basis.
@@ -70,14 +70,14 @@ You should use this manager if you want a "set it and forget it" solution optimi
 
 ### 🛡️ Crash Protection & Process Management
 * **Active PID Monitoring:** Monitors the server's Process ID (PID) and executable path. If the process dies unexpectedly, it instantly triggers recovery.
-* **Smart Process Adoption:** If the GUI is opened while the server is already running, it adopts the existing PID, preventing dual-instances and hijacking servers in other directories.
-* **Intelligent Crash vs. Reboot Handling:** Crash detection explicitly suspends during a scheduled reboot, preventing false-positive "Crash detected!" alerts in the console.
-* **File Lock Safety Delays:** Both scheduled reboots and crash recovery routines enforce a strict 10-second delay between stopping the server and starting it back up, ensuring all world files and processes are fully released by the OS and preventing world corruption.
-* **Graceful Shutdown (stdin):** Attempts to send the native `stop` command to the server via stdin to allow it to save worlds gracefully before falling back to a force-kill.
-* **Graceful Window Closing:** Closing the GUI intercepts the shutdown and grants the server a 10-second window to safely save worlds and halt before force-killing the process.
+* **Smart Process Adoption:** If the GUI is opened while the server is already running, it adopts the existing PID, preventing dual instances and hijacking servers in other directories.
+* **Intelligent Crash vs. Reboot Handling:** Crash detection explicitly suspends during a scheduled reboot, preventing false positive "Crash detected!" alerts in the console.
+* **File Lock Safety Delays:** Both scheduled reboots and crash recovery routines enforce a strict 10 second delay between stopping the server and starting it back up, ensuring all world files and processes are fully released by the OS and preventing world corruption.
+* **Graceful Shutdown (stdin):** Attempts to send the native `stop` command to the server via stdin to allow it to save worlds gracefully before falling back to a force kill.
+* **Graceful Window Closing:** Closing the GUI intercepts the shutdown and grants the server a 10 second window to safely save worlds and halt before force killing the process.
 
 ### ⚙️ Under the Hood (Technical Stability)
-* **Dual-Thread Architecture:** The GUI runs on a dedicated Single-Threaded Apartment (STA) thread, ensuring the UI never freezes during heavy background tasks.
+* **Dual-Thread Architecture:** The GUI runs on a dedicated Single Threaded Apartment (STA) thread, ensuring the UI never freezes during heavy background tasks.
 * **Background Runspaces:** Heavy lifting (downloading, extracting, hashing) is processed in isolated MTA Runspaces.
 * **Thread-Safe Locks:** Implements `StdInWriteLock`, `TypeCompileLock`, and synchronized ArrayLists to completely eliminate race conditions across concurrent background tasks.
 * **Concurrent Queue Reader:** Uses a custom C# wrapper (`BedrockProcessReader`) utilizing `ConcurrentQueue` to asynchronously read server stdout/stderr without blocking the UI thread.
