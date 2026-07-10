@@ -8,7 +8,7 @@ Now features a DUAL CONSOLE layout:
 - Server console (right): wrapped bedrock_server.exe stdin/stdout via .NET Process redirection — supports sending custom commands from the GUI.
 Optimized for long-term stability (weeks/months of uptime).
 Color scheme: Catppuccin Macchiato
-.VERSION 28.4.7
+.VERSION 26.07.09
 #>
 param([string]$RootPath = "", [switch]$ApplyStaticIp)
 Add-Type -AssemblyName System.Windows.Forms
