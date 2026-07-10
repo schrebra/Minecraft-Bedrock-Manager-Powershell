@@ -20,7 +20,7 @@ It operates using a strict, clean folder hierarchy (defaulting to `C:\Bedrock`):
 * `\UpdateTemp` - Temporary staging for safe updates.
 * `\Config` - Settings are stored in a configuration `.ini` file.
 
-Include Bedrock Server Configurator HTML file to quickly setup your server setup without your eyes glazing over looking at the server.properties file
+Includes Bedrock Server Configurator HTML file to quickly setup your server.properties file.
 
 ## Why You Should Use It
 Running a vanilla Minecraft Bedrock server manually requires constant maintenance. Updates are frequent, and missing one means players on updated clients cannot join. Furthermore, command-line execution lacks native crash monitoring, and backing up world data usually requires writing custom scripts. 
