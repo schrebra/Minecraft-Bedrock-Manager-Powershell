@@ -50,7 +50,6 @@ try {
     # 3. Resolve and create directories
     # ---------------------------------------------------------------------------
     Write-Log "Step 2: Creating directory structure..."
-    # PS 5.1 Compat: Join-Path only takes two arguments, so we nest them.
     $bpRoot     = Join-Path (Join-Path $ServerPath "behavior_packs") $PackName
     $scriptsDir = Join-Path $bpRoot "scripts"
     
@@ -76,7 +75,7 @@ try {
     "format_version": 2,
     "header": {
         "name": "$PackName BP",
-        "description": "Chops down whole trees when the bottom log is broken with an axe.",
+        "description": "Chops down whole trees when sneaking and breaking a log with an axe.",
         "uuid": "$PackUuid",
         "version": [1, 0, 0],
         "min_engine_version": [1, 20, 70]
@@ -98,7 +97,6 @@ try {
     ]
 }
 "@
-    # NOTE: The closing "@ above MUST be at column 0. Do not indent it.
     
     $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
     [System.IO.File]::WriteAllText($manifestPath, $manifestContent, $utf8NoBom)
@@ -113,101 +111,190 @@ try {
     $jsContent = @'
 import { world, system } from "@minecraft/server";
 
-// Log to server console so you can verify the script actually loaded
 console.warn("[Treecapitator] Script initialized and listening for block breaks.");
 
-const MAX_BLOCKS = 150;
-const AXE_SUFFIXES = ["_axe"];
-const LOG_SUFFIX = "_log";
+// --- Tunables -------------------------------------------------------------
+const MAX_LOGS         = 400;   // hard cap on logs felled per tree
+const MAX_LEAVES       = 1200;  // hard cap on leaves cleared per tree
+const MAX_RADIUS       = 24;    // max distance from the broken block
+const AXE_SUFFIXES     = ["_axe"];
+const LOG_SUFFIX       = "_log";
+const LEAVES_SUFFIX    = "_leaves";
+const BATCH_SIZE       = 8;     // blocks destroyed per tick
+const LEAF_RADIUS      = 3;     // max distance a leaf can be from a log
+                                // to be considered part of the SAME tree
+// --------------------------------------------------------------------------
 
 world.afterEvents.playerBreakBlock.subscribe((event) => {
     const { player, block, brokenBlockPermutation } = event;
     const blockTypeId = brokenBlockPermutation.type.id;
 
-    if (!blockTypeId.endsWith(LOG_SUFFIX)) {
-        return;
-    }
+    if (!blockTypeId.endsWith(LOG_SUFFIX)) return;
 
-    const heldItem = player.getComponent("equippable")?.getEquipment("Mainhand");
-    if (!heldItem || !AXE_SUFFIXES.some(suffix => heldItem.typeId.endsWith(suffix))) {
-        return;
-    }
+    const equippable = player.getComponent("equippable");
+    const heldItem = equippable?.getEquipment("Mainhand");
+    if (!heldItem || !AXE_SUFFIXES.some(s => heldItem.typeId.endsWith(s))) return;
+
+    // Must be holding shift (sneaking) to trigger treecapitator
+    if (!player.isSneaking) return;
 
     console.warn(`[Treecapitator] Triggered by ${player.name} on ${blockTypeId} at X:${block.x} Y:${block.y} Z:${block.z}`);
 
-    system.run(() => {
-        chopTree(block.dimension, { x: block.x, y: block.y, z: block.z }, blockTypeId);
-    });
+    const dim = block.dimension;
+    const start = { x: block.x, y: block.y, z: block.z };
+
+    system.run(() => chopTree(dim, start, blockTypeId));
 });
 
-function chopTree(dimension, startLoc, logTypeId) {
-    const queue = getFaceNeighbours(startLoc);
-    const visited = new Set();
+function chopTree(dimension, start, logTypeId) {
+    const startKey = encodeLocation(start);
 
-    visited.add(encodeLocation(startLoc));
-    for (const loc of queue) {
-        visited.add(encodeLocation(loc));
+    // ---- 1. Find all connected logs -------------------------------------
+    const logVisited = new Set([startKey]);
+    const logQueue   = [];
+    const logsToBreak = [];
+
+    for (const n of getNeighbours26(start)) {
+        const k = encodeLocation(n);
+        if (!logVisited.has(k)) {
+            logVisited.add(k);
+            logQueue.push(n);
+        }
     }
 
-    let blocksBroken = 0;
+    while (logQueue.length > 0 && logsToBreak.length < MAX_LOGS) {
+        const loc = logQueue.shift();
 
-    function processNext() {
-        const BATCH_SIZE = 5;
-        let processed = 0;
+        if (!withinRadius(loc, start)) continue;
 
-        while (queue.length > 0 && blocksBroken < MAX_BLOCKS && processed < BATCH_SIZE) {
-            const loc = queue.shift();
-            processed++;
+        let blk;
+        try { blk = dimension.getBlock(loc); } catch { continue; }
+        if (!blk) continue;
 
-            let targetBlock;
-            try {
-                targetBlock = dimension.getBlock(loc);
-            } catch {
-                continue;
-            }
-
-            if (!targetBlock || targetBlock.typeId !== logTypeId) {
-                continue;
-            }
-
-            dimension.runCommandAsync(`setblock ${loc.x} ${loc.y} ${loc.z} air destroy`);
-            blocksBroken++;
-
-            for (const neighbour of getFaceNeighbours(loc)) {
-                const key = encodeLocation(neighbour);
-                if (!visited.has(key)) {
-                    visited.add(key);
-                    queue.push(neighbour);
+        if (blk.typeId === logTypeId) {
+            logsToBreak.push(loc);
+            for (const n of getNeighbours26(loc)) {
+                const k = encodeLocation(n);
+                if (!logVisited.has(k)) {
+                    logVisited.add(k);
+                    logQueue.push(n);
                 }
             }
         }
+    }
 
-        if (queue.length > 0 && blocksBroken < MAX_BLOCKS) {
-            system.run(processNext);
-        } else {
-            console.warn(`[Treecapitator] Finished felling tree. Blocks removed: ${blocksBroken}`);
+    // ---- 2. Find leaves of THIS tree only -------------------------------
+    // We avoid flood-filling through leaves because overlapping canopies
+    // would cause neighboring trees to be destroyed. Instead, we only 
+    // collect leaves that are physically close to the logs of THIS tree.
+    const leavesToBreak = [];
+    const leafVisited = new Set();
+
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+    for (const log of logsToBreak) {
+        minX = Math.min(minX, log.x); maxX = Math.max(maxX, log.x);
+        minY = Math.min(minY, log.y); maxY = Math.max(maxY, log.y);
+        minZ = Math.min(minZ, log.z); maxZ = Math.max(maxZ, log.z);
+    }
+
+    let leafLimitReached = false;
+    for (let x = minX - LEAF_RADIUS; x <= maxX + LEAF_RADIUS && !leafLimitReached; x++) {
+        for (let y = minY - LEAF_RADIUS; y <= maxY + LEAF_RADIUS && !leafLimitReached; y++) {
+            for (let z = minZ - LEAF_RADIUS; z <= maxZ + LEAF_RADIUS && !leafLimitReached; z++) {
+                const loc = { x, y, z };
+                if (!withinRadius(loc, start)) continue;
+
+                let blk;
+                try { blk = dimension.getBlock(loc); } catch { continue; }
+                
+                if (blk && blk.typeId.endsWith(LEAVES_SUFFIX)) {
+                    // Check if this leaf is within LEAF_RADIUS of any log
+                    let nearLog = false;
+                    for (const log of logsToBreak) {
+                        const dx = Math.abs(x - log.x);
+                        const dy = Math.abs(y - log.y);
+                        const dz = Math.abs(z - log.z);
+                        if (dx <= LEAF_RADIUS && dy <= LEAF_RADIUS && dz <= LEAF_RADIUS) {
+                            nearLog = true;
+                            break;
+                        }
+                    }
+                    
+                    if (nearLog) {
+                        const key = encodeLocation(loc);
+                        if (!leafVisited.has(key)) {
+                            leafVisited.add(key);
+                            leavesToBreak.push(loc);
+                            if (leavesToBreak.length >= MAX_LEAVES) {
+                                leafLimitReached = true;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
-    system.run(processNext);
+    console.warn(`[Treecapitator] Located ${logsToBreak.length} logs and ${leavesToBreak.length} leaves.`);
+
+    // ---- 3. Destroy in batches to spread load across ticks --------------
+    let logIdx = 0;
+    let leafIdx = 0;
+
+    function processBatch() {
+        let processed = 0;
+
+        while (logIdx < logsToBreak.length && processed < BATCH_SIZE) {
+            const loc = logsToBreak[logIdx++];
+            processed++;
+            try {
+                dimension.runCommandAsync(`setblock ${loc.x} ${loc.y} ${loc.z} air destroy`);
+            } catch { /* ignore */ }
+        }
+
+        while (leafIdx < leavesToBreak.length && processed < BATCH_SIZE) {
+            const loc = leavesToBreak[leafIdx++];
+            processed++;
+            try {
+                dimension.runCommandAsync(`setblock ${loc.x} ${loc.y} ${loc.z} air destroy`);
+            } catch { /* ignore */ }
+        }
+
+        if (logIdx < logsToBreak.length || leafIdx < leavesToBreak.length) {
+            system.run(processBatch);
+        } else {
+            console.warn(`[Treecapitator] Done. Logs removed: ${logsToBreak.length}, Leaves removed: ${leavesToBreak.length}`);
+        }
+    }
+
+    system.run(processBatch);
 }
 
-function getFaceNeighbours(loc) {
-    return [
-        { x: loc.x + 1, y: loc.y,     z: loc.z     },
-        { x: loc.x - 1, y: loc.y,     z: loc.z     },
-        { x: loc.x,     y: loc.y + 1, z: loc.z     },
-        { x: loc.x,     y: loc.y - 1, z: loc.z     },
-        { x: loc.x,     y: loc.y,     z: loc.z + 1 },
-        { x: loc.x,     y: loc.y,     z: loc.z - 1 },
-    ];
+function getNeighbours26(loc) {
+    const out = [];
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dz = -1; dz <= 1; dz++) {
+                if (dx === 0 && dy === 0 && dz === 0) continue;
+                out.push({ x: loc.x + dx, y: loc.y + dy, z: loc.z + dz });
+            }
+        }
+    }
+    return out;
+}
+
+function withinRadius(loc, start) {
+    return Math.abs(loc.x - start.x) <= MAX_RADIUS &&
+           Math.abs(loc.y - start.y) <= MAX_RADIUS &&
+           Math.abs(loc.z - start.z) <= MAX_RADIUS;
 }
 
 function encodeLocation(loc) {
-    return `${loc.x},${loc.y},${loc.z}`;
+    return loc.x + "," + loc.y + "," + loc.z;
 }
 '@
-    # NOTE: The closing '@ above MUST be at column 0. Do not indent it.
 
     [System.IO.File]::WriteAllText($mainJsPath, $jsContent, $utf8NoBom)
     Write-Log "main.js written to: $mainJsPath" -Level "OK"
@@ -235,7 +322,6 @@ function encodeLocation(loc) {
     # 7. Register Pack in World
     # ---------------------------------------------------------------------------
     Write-Log "Step 6: Registering pack in world_behavior_packs.json..."
-    # PS 5.1 Compat: Nest Join-Path for multiple path segments
     $worldsDir = Join-Path $ServerPath "worlds"
     $worldDir = Join-Path $worldsDir $levelName
     $worldBpJsonPath = Join-Path $worldDir "world_behavior_packs.json"
@@ -281,7 +367,6 @@ function encodeLocation(loc) {
         }
         $currentPacks.Add($newEntry)
 
-        # PS5.1 Workaround for single-element arrays: Force JSON array brackets manually if count is 1
         $jsonOutput = $currentPacks | ConvertTo-Json -Depth 10
         if ($currentPacks.Count -eq 1) {
             $jsonOutput = "[$jsonOutput]"
@@ -302,7 +387,6 @@ function encodeLocation(loc) {
     Write-Log $_.Exception.Message -Level "ERROR"
     Write-Log "Stack Trace: $($_.ScriptStackTrace)" -Level "ERROR"
 } finally {
-    # Pause at the end so the window doesn't close immediately
     Write-Host ""
     Write-Host "Press Enter to exit..." -ForegroundColor Cyan
     Read-Host
