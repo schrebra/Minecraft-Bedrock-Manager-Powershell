@@ -23,6 +23,8 @@ It operates using a strict, clean folder hierarchy (defaulting to `C:\Bedrock`):
 
 Includes Bedrock Server Configurator HTML file to quickly setup your server.properties file.
 
+Includes easy to install or remove Minecraft Bedrock Server Addons (Mods) using powershell scripts.
+
 ## Why You Should Use It
 Running a vanilla Minecraft Bedrock server manually requires constant maintenance. Updates are frequent, and missing one means players on updated clients cannot join. Furthermore, command-line execution lacks native crash monitoring, and backing up world data usually requires writing custom scripts. 
 
@@ -97,12 +99,13 @@ You should use this manager if you want a "set it and forget it" solution optimi
 * Windows 10 / Windows 11 / Windows Server
 * Windows PowerShell 5.1 (`#Requires -Version 5.1`)
 * **Administrator privileges** (Optional, but required if you want the tool to automatically configure a Static IP, manage the Windows Firewall rules, or install missing VC++ runtime dependencies).
-
+* When downloading repo you must right click on the powershell scripts and uncheck unblock script. Otherwise it will not run.
 ---
 
 ## How to Allow Players to Join
 
 Once your Minecraft server has successfully started, follow these quick steps to let others connect:
+ - If you install addons you must run this command as well.
 
 1. Open your server console window on the right side of the manager.
 2. Type the following command exactly as shown: `allowlist off`
