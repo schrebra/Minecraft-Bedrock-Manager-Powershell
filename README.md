@@ -1,3 +1,7 @@
+(Retired Project) - See new project adapted to C#
+
+https://github.com/schrebra/Minecraft-Bedrock-Manager-CSharp
+
 # Minecraft Bedrock Server Manager
 
 ## What It Is
